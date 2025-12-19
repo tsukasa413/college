@@ -18,16 +18,17 @@ class GStreamerCamera(Node):
         self.publisher_ = self.create_publisher(Image, topic_name, 10)
         self.bridge = CvBridge()
 
-        # --- 安定化版 GStreamer Pipeline ---
-        # 1. sensor-mode=2: 1944x1096モードを明示的に指定し、初期化の迷いをなくす
+        # --- 低解像度版 GStreamer Pipeline (720p) ---
+        # 1. sensor-mode=3: 1296x732モードを使用（センサーのビニングモードで低解像度）
         # 2. bufapi-version=1: 新しいJetPackでのメモリ確保エラーを防ぐおまじない
         # 3. queue: 各処理の間にバッファ(queue)を挟み、一方が詰まっても他方を止めないようにする
+        # 4. nvvidconv: 1280x720にリサイズしてデータ量を削減
         self.pipeline = (
-            f"nvarguscamerasrc sensor-id={self.sensor_id} sensor-mode=2 bufapi-version=1 ! "
-            "video/x-raw(memory:NVMM), width=(int)1944, height=(int)1096, format=(string)NV12, framerate=(fraction)32/1 ! "
+            f"nvarguscamerasrc sensor-id={self.sensor_id} sensor-mode=3 bufapi-version=1 ! "
+            "video/x-raw(memory:NVMM), width=(int)1296, height=(int)732, format=(string)NV12, framerate=(fraction)32/1 ! "
             "queue max-size-buffers=1 leaky=downstream ! "
-            "nvvidconv left=8 right=1928 top=8 bottom=1088 ! "
-            "video/x-raw, width=(int)1920, height=(int)1080, format=(string)BGRx ! "
+            "nvvidconv ! "
+            "video/x-raw, width=(int)1280, height=(int)720, format=(string)BGRx ! "
             "queue max-size-buffers=1 leaky=downstream ! "
             "videoconvert ! "
             "video/x-raw, format=(string)BGR ! "
@@ -35,7 +36,7 @@ class GStreamerCamera(Node):
             "appsink sync=false drop=true"
         )
         
-        self.get_logger().info(f'Opening Camera {self.sensor_id} (Stable Pipeline)...')
+        self.get_logger().info(f'Opening Camera {self.sensor_id} (720p Low-Res Pipeline)...')
         self.cap = cv2.VideoCapture(self.pipeline, cv2.CAP_GSTREAMER)
 
         if not self.cap.isOpened():
