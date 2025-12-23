@@ -85,6 +85,7 @@ int main(int argc, char** argv) {
         depth_estimator.update(images_to_match, rgb_panorama, distance_map);
         std::cout << "depth_estimator.update() completed!" << std::endl;
         
+<<<<<<< HEAD
         // Get depth map from GPU
         std::cout << "Downloading depth map from GPU..." << std::endl;
         cv::Mat depth_map = depth_estimator.getDepthMap();
@@ -126,13 +127,19 @@ int main(int argc, char** argv) {
             cv::waitKey(0); // Wait for key press
         }
         
+=======
+>>>>>>> 8b6cbbb033137a10733183b3a076e515736cbed6
         // 結果検証
         std::cout << "RGB panorama: " << rgb_panorama.cols << "x" << rgb_panorama.rows 
                   << " (empty=" << rgb_panorama.empty() << ")" << std::endl;
         std::cout << "Distance map: " << distance_map.cols << "x" << distance_map.rows 
                   << " (empty=" << distance_map.empty() << ")" << std::endl;
         
+<<<<<<< HEAD
         std::cout << "SUCCESS: Phase 5 complete with depth visualization!" << std::endl;
+=======
+        std::cout << "SUCCESS: First frame test completed!" << std::endl;
+>>>>>>> 8b6cbbb033137a10733183b3a076e515736cbed6
         
         // メモリクリーンアップ
         for (int cam = 0; cam < 4; ++cam) {
