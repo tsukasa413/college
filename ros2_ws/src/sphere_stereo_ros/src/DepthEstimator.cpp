@@ -606,6 +606,7 @@ void DepthEstimator::preprocessImages(const std::vector<cv::Mat>& images)
             continuous_matching = rgb_matching.clone();
         }
         
+<<<<<<< HEAD
         // Debug: Check memory bounds and pointers with proper byte-level calculations
         size_t copy_offset_elements = cam * matching_size * 3;
         size_t copy_offset_bytes = copy_offset_elements * sizeof(uint8_t);
@@ -621,6 +622,18 @@ void DepthEstimator::preprocessImages(const std::vector<cv::Mat>& images)
         printf("    total_memory=%zu, end_pos=%zu\n", total_matching_memory_bytes, copy_offset_bytes + copy_size_bytes);
         printf("    h_images_matching_pinned_=%p, target=%p\n", 
                h_images_matching_pinned_, target_ptr);
+=======
+        // Debug: Check memory bounds and pointers
+        size_t copy_offset = cam * matching_size * 3;
+        size_t copy_size = matching_size * 3 * sizeof(uint8_t);
+        size_t total_matching_memory = num_cameras_ * matching_size * 3 * sizeof(uint8_t);
+        
+        printf("    cam=%d, matching_size=%d, offset=%zu, copy_size=%zu\n", 
+               cam, matching_size, copy_offset, copy_size);
+        printf("    total_memory=%zu, end_pos=%zu\n", total_matching_memory, copy_offset + copy_size);
+        printf("    h_images_matching_pinned_=%p, target=%p\n", 
+               h_images_matching_pinned_, h_images_matching_pinned_ + copy_offset);
+>>>>>>> 8b6cbbb033137a10733183b3a076e515736cbed6
         printf("    continuous_matching: data=%p, rows=%d, cols=%d, continuous=%d\n", 
                continuous_matching.data, continuous_matching.rows, continuous_matching.cols, 
                continuous_matching.isContinuous());
@@ -636,6 +649,7 @@ void DepthEstimator::preprocessImages(const std::vector<cv::Mat>& images)
             exit(1);
         }
         
+<<<<<<< HEAD
         if (copy_offset_bytes + copy_size_bytes > total_matching_memory_bytes) {
             printf("ERROR: Memory boundary exceeded! offset+size=%zu > total=%zu\n", 
                    copy_offset_bytes + copy_size_bytes, total_matching_memory_bytes);
@@ -645,6 +659,18 @@ void DepthEstimator::preprocessImages(const std::vector<cv::Mat>& images)
         // 3. Safe memory copy with proper byte-level pointer arithmetic
         try {
             std::memcpy(target_ptr, continuous_matching.data, copy_size_bytes);
+=======
+        if (copy_offset + copy_size > total_matching_memory) {
+            printf("ERROR: Memory boundary exceeded! offset+size=%zu > total=%zu\n", 
+                   copy_offset + copy_size, total_matching_memory);
+            exit(1);
+        }
+        
+        // 3. Safe memory copy with error handling
+        try {
+            std::memcpy(h_images_matching_pinned_ + copy_offset, 
+                        continuous_matching.data, copy_size);
+>>>>>>> 8b6cbbb033137a10733183b3a076e515736cbed6
             std::cout << "  Matching copy complete" << std::endl;
         } catch (const std::exception& e) {
             printf("ERROR: memcpy failed: %s\n", e.what());
@@ -723,6 +749,7 @@ void DepthEstimator::preprocessImages(const std::vector<cv::Mat>& images)
         // Copy to pinned memory (stitch resolution)
         std::cout << "  Copying stitch to pinned memory..." << std::endl;
         
+<<<<<<< HEAD
         // Debug: Check stitch memory bounds with proper byte-level calculations
         size_t stitch_offset_elements = cam * stitch_size * 3;
         size_t stitch_offset_bytes = stitch_offset_elements * sizeof(uint8_t);
@@ -738,6 +765,18 @@ void DepthEstimator::preprocessImages(const std::vector<cv::Mat>& images)
         printf("    total_memory=%zu, end_pos=%zu\n", total_stitch_memory_bytes, stitch_offset_bytes + stitch_copy_size_bytes);
         printf("    h_images_stitch_pinned_=%p, target=%p\n", 
                h_images_stitch_pinned_, stitch_target_ptr);
+=======
+        // Debug: Check stitch memory bounds and pointers
+        size_t stitch_offset = cam * stitch_size * 3;
+        size_t stitch_copy_size = stitch_size * 3 * sizeof(uint8_t);
+        size_t total_stitch_memory = num_cameras_ * stitch_size * 3 * sizeof(uint8_t);
+        
+        printf("    stitch: cam=%d, stitch_size=%d, offset=%zu, copy_size=%zu\n", 
+               cam, stitch_size, stitch_offset, stitch_copy_size);
+        printf("    total_memory=%zu, end_pos=%zu\n", total_stitch_memory, stitch_offset + stitch_copy_size);
+        printf("    h_images_stitch_pinned_=%p, target=%p\n", 
+               h_images_stitch_pinned_, h_images_stitch_pinned_ + stitch_offset);
+>>>>>>> 8b6cbbb033137a10733183b3a076e515736cbed6
         printf("    continuous_stitch: data=%p, rows=%d, cols=%d, continuous=%d\n", 
                continuous_stitch.data, continuous_stitch.rows, continuous_stitch.cols,
                continuous_stitch.isContinuous());
@@ -753,6 +792,7 @@ void DepthEstimator::preprocessImages(const std::vector<cv::Mat>& images)
             exit(1);
         }
         
+<<<<<<< HEAD
         if (stitch_offset_bytes + stitch_copy_size_bytes > total_stitch_memory_bytes) {
             printf("ERROR: Stitch memory boundary exceeded! offset+size=%zu > total=%zu\n", 
                    stitch_offset_bytes + stitch_copy_size_bytes, total_stitch_memory_bytes);
@@ -762,6 +802,18 @@ void DepthEstimator::preprocessImages(const std::vector<cv::Mat>& images)
         // 3. Safe memory copy with proper byte-level pointer arithmetic
         try {
             std::memcpy(stitch_target_ptr, continuous_stitch.data, stitch_copy_size_bytes);
+=======
+        if (stitch_offset + stitch_copy_size > total_stitch_memory) {
+            printf("ERROR: Stitch memory boundary exceeded! offset+size=%zu > total=%zu\n", 
+                   stitch_offset + stitch_copy_size, total_stitch_memory);
+            exit(1);
+        }
+        
+        // 3. Safe memory copy with error handling
+        try {
+            std::memcpy(h_images_stitch_pinned_ + stitch_offset, 
+                        continuous_stitch.data, stitch_copy_size);
+>>>>>>> 8b6cbbb033137a10733183b3a076e515736cbed6
             std::cout << "  Stitch copy complete" << std::endl;
         } catch (const std::exception& e) {
             printf("ERROR: stitch memcpy failed: %s\n", e.what());
@@ -813,6 +865,7 @@ void DepthEstimator::preprocessImages(const std::vector<cv::Mat>& images)
 }
 
 // =============================================================================
+<<<<<<< HEAD
 // Depth Map Access
 // =============================================================================
 
@@ -842,6 +895,8 @@ cv::Mat DepthEstimator::getDepthMap() const
 }
 
 // =============================================================================
+=======
+>>>>>>> 8b6cbbb033137a10733183b3a076e515736cbed6
 // Fisheye Distance Estimation
 // =============================================================================
 
@@ -964,9 +1019,13 @@ void DepthEstimator::update(
         cv::cvtColor(rgb_mat, stitch_images_cpu_[ref_idx], cv::COLOR_RGB2BGR);
     }
     
+<<<<<<< HEAD
     // 5. For Phase 5 testing: Skip stitcher and return depth map directly
     // TODO: Re-enable stitcher after fixing image count mismatch
     /*
+=======
+    // 5. Upload to stitcher and stitch
+>>>>>>> 8b6cbbb033137a10733183b3a076e515736cbed6
     stitcher_->uploadImages(stitch_images_cpu_);
     stitcher_->uploadDistances(distance_maps_cpu_);
     stitcher_->stitch();
@@ -974,6 +1033,7 @@ void DepthEstimator::update(
     // 6. Download results
     rgb_panorama = stitcher_->downloadRGBPanorama();
     distance_panorama = stitcher_->downloadDistancePanorama();
+<<<<<<< HEAD
     */
     
     // Create dummy RGB panorama for testing
@@ -987,6 +1047,8 @@ void DepthEstimator::update(
     }
     
     std::cout << "Phase 5: Depth estimation completed (stitcher bypassed for testing)" << std::endl;
+=======
+>>>>>>> 8b6cbbb033137a10733183b3a076e515736cbed6
 }
 
 void DepthEstimator::synchronize()

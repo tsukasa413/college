@@ -4,6 +4,8 @@ rosbag2_bagfile_information:
   duration:
     nanoseconds: 113775945520
   starting_time:
+    nanoseconds_since_epoch: 1766126066848858906
+  message_count: 8934
     nanoseconds_since_epoch: 1766235779323119738
   message_count: 11217
   topics_with_message_count:
