@@ -25,6 +25,8 @@ setup(
     entry_points={
         'console_scripts': [
             'cam_node = quad_cam_system.cam_node:main',
+            'sync_cam_node = quad_cam_system.sync_cam_node:main',
+            'mono_cam_node = quad_cam_system.mono_cam_node:main',
         ],
     },
 )

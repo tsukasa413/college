@@ -27,8 +27,10 @@ source devel/setup.bash
 
 # 3. (セットアップ成功後) Kalibrを実行
 rosrun kalibr kalibr_calibrate_cameras \
-  --bag /data/my_camera_dataset.bag \
-  --target /data/april_6x6.yaml \
-  --models omni-radtan omni-radtan omni-radtan omni-radtan \
-  --topics /camera_0/image_raw /camera_1/image_raw /camera_2/image_raw /camera_3/image_raw
+    --bag /data/my_camera_dataset.bag \
+    --target /data/april_6x6.yaml \
+    --models ds-none ds-none ds-none ds-none \
+    --topics /camera_0/image_raw /camera_1/image_raw /camera_2/image_raw /camera_3/image_raw \
+    --approx-sync 0.005 \
+    --bag-freq 4.0
 ```
