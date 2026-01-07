@@ -1,0 +1,32 @@
+Starting >>> my_stereo_pkg
+--- stderr: my_stereo_pkg
+CMake Warning at CMakeLists.txt:41 (message):
+  CUDA not found.  Building without CUDA support.
+
+
+CMake Warning at CMakeLists.txt:45 (find_package):
+  By not providing "FindTorch.cmake" in CMAKE_MODULE_PATH this project has
+  asked CMake to find a package configuration file provided by "Torch", but
+  CMake did not find one.
+
+  Could not find a package configuration file provided by "Torch" with any of
+  the following names:
+
+    TorchConfig.cmake
+    torch-config.cmake
+
+  Add the installation prefix of "Torch" to CMAKE_PREFIX_PATH or set
+  "Torch_DIR" to a directory containing one of the above files.  If "Torch"
+  provides a separate development package or SDK, be sure it has been
+  installed.
+
+
+CMake Warning at CMakeLists.txt:51 (message):
+  LibTorch not found.  Building without PyTorch support.
+
+
+---
+Finished <<< my_stereo_pkg [7.91s]
+
+Summary: 1 package finished [8.15s]
+  1 package had stderr output: my_stereo_pkg
