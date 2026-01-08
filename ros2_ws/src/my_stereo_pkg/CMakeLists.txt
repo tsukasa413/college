@@ -24,9 +24,10 @@ find_package(ament_cmake_python REQUIRED)
 # find_package(sensor_msgs REQUIRED)
 # find_package(cv_bridge REQUIRED)  # Temporarily disabled due to OpenCV issues
 
-# Find PyTorch - Temporarily disabled for basic testing
-# find_package(Torch REQUIRED)
-# set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
+# Find PyTorch 
+set(CMAKE_PREFIX_PATH "/home/motoken/.local/lib/python3.10/site-packages/torch/share/cmake/Torch;${CMAKE_PREFIX_PATH}")
+find_package(Torch REQUIRED)
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
 
 # Find CUDA - Temporarily disabled for basic testing  
 # find_package(CUDAToolkit REQUIRED)
@@ -40,32 +41,30 @@ find_package(Python3 REQUIRED COMPONENTS Interpreter Development)
 # Set CUDA architecture for Jetson AGX Orin (Ampere architecture) - Temporarily disabled
 # set(CMAKE_CUDA_ARCHITECTURES 87)
 
-# Include directories - Temporarily disabled for basic testing
-# include_directories(
-#   ${TORCH_INCLUDE_DIRS}
-#   ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
-# )
+# Include directories
+include_directories(
+  ${TORCH_INCLUDE_DIRS}
+  ${Python3_INCLUDE_DIRS}
+)
 
-# Create pybind11 module
-pybind11_add_module(_core_cpp 
+# Create PyTorch extension module (instead of pybind11_add_module)
+add_library(_core_cpp MODULE 
   src/bindings.cpp
 )
 
-# Set properties for the pybind11 module
+# Set properties for the PyTorch extension module
 set_target_properties(_core_cpp PROPERTIES
   CXX_STANDARD 17
   CXX_STANDARD_REQUIRED ON
   POSITION_INDEPENDENT_CODE ON
+  PREFIX ""  # Remove lib prefix for Python modules
 )
 
-# Link libraries - Temporarily disabled for basic testing
-# target_link_libraries(_core_cpp PRIVATE
-#   ${TORCH_LIBRARIES}
-#   CUDA::cudart
-#   CUDA::cublas
-#   CUDA::curand
-#   CUDA::cusparse
-# )
+# Link PyTorch libraries 
+target_link_libraries(_core_cpp PRIVATE
+  ${TORCH_LIBRARIES}
+  pybind11::module
+)
 
 # Compiler-specific options
 target_compile_definitions(_core_cpp PRIVATE VERSION_INFO=${EXAMPLE_VERSION_INFO})
