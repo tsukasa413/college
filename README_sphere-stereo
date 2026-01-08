@@ -1,0 +1,9 @@
+# activate venv
+```
+cd sphere-stereo/
+source .venv/bin/activate
+```
+# run
+```
+python python/main.py --dataset_path resources --references_indices 2 3  --visualize True
+```
