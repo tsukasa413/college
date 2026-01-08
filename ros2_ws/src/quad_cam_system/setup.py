@@ -27,6 +27,8 @@ setup(
             'cam_node = quad_cam_system.cam_node:main',
             'sync_cam_node = quad_cam_system.sync_cam_node:main',
             'mono_cam_node = quad_cam_system.mono_cam_node:main',
+            'max_resolution_capture = quad_cam_system.max_resolution_capture_node:main',
+            'max_resolution_capture_service = quad_cam_system.max_resolution_capture_service:main',
         ],
     },
 )

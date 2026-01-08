@@ -2,37 +2,35 @@ rosbag2_bagfile_information:
   version: 5
   storage_identifier: mcap
   duration:
-    nanoseconds: 113775945520
+    nanoseconds: 64628099203
   starting_time:
-    nanoseconds_since_epoch: 1766126066848858906
-  message_count: 8934
-    nanoseconds_since_epoch: 1766235779323119738
-  message_count: 11217
+    nanoseconds_since_epoch: 1767852530993711813
+  message_count: 6148
   topics_with_message_count:
     - topic_metadata:
-        name: /camera_0/image_raw
+        name: /camera_0/image_mono
         type: sensor_msgs/msg/Image
         serialization_format: cdr
         offered_qos_profiles: "- history: 3\n  depth: 0\n  reliability: 1\n  durability: 2\n  deadline:\n    sec: 9223372036\n    nsec: 854775807\n  lifespan:\n    sec: 9223372036\n    nsec: 854775807\n  liveliness: 1\n  liveliness_lease_duration:\n    sec: 9223372036\n    nsec: 854775807\n  avoid_ros_namespace_conventions: false"
-      message_count: 2806
+      message_count: 1537
     - topic_metadata:
-        name: /camera_1/image_raw
+        name: /camera_1/image_mono
         type: sensor_msgs/msg/Image
         serialization_format: cdr
         offered_qos_profiles: "- history: 3\n  depth: 0\n  reliability: 1\n  durability: 2\n  deadline:\n    sec: 9223372036\n    nsec: 854775807\n  lifespan:\n    sec: 9223372036\n    nsec: 854775807\n  liveliness: 1\n  liveliness_lease_duration:\n    sec: 9223372036\n    nsec: 854775807\n  avoid_ros_namespace_conventions: false"
-      message_count: 2803
+      message_count: 1537
     - topic_metadata:
-        name: /camera_2/image_raw
+        name: /camera_2/image_mono
         type: sensor_msgs/msg/Image
         serialization_format: cdr
         offered_qos_profiles: "- history: 3\n  depth: 0\n  reliability: 1\n  durability: 2\n  deadline:\n    sec: 9223372036\n    nsec: 854775807\n  lifespan:\n    sec: 9223372036\n    nsec: 854775807\n  liveliness: 1\n  liveliness_lease_duration:\n    sec: 9223372036\n    nsec: 854775807\n  avoid_ros_namespace_conventions: false"
-      message_count: 2812
+      message_count: 1537
     - topic_metadata:
-        name: /camera_3/image_raw
+        name: /camera_3/image_mono
         type: sensor_msgs/msg/Image
         serialization_format: cdr
         offered_qos_profiles: "- history: 3\n  depth: 0\n  reliability: 1\n  durability: 2\n  deadline:\n    sec: 9223372036\n    nsec: 854775807\n  lifespan:\n    sec: 9223372036\n    nsec: 854775807\n  liveliness: 1\n  liveliness_lease_duration:\n    sec: 9223372036\n    nsec: 854775807\n  avoid_ros_namespace_conventions: false"
-      message_count: 2796
+      message_count: 1537
   compression_format: ""
   compression_mode: ""
   relative_file_paths:
@@ -40,7 +38,7 @@ rosbag2_bagfile_information:
   files:
     - path: my_slam_dataset_0.mcap
       starting_time:
-        nanoseconds_since_epoch: 1766235779323119738
+        nanoseconds_since_epoch: 1767852530993711813
       duration:
-        nanoseconds: 113775945520
-      message_count: 11368
+        nanoseconds: 64628099203
+      message_count: 6148
