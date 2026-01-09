@@ -45,6 +45,7 @@ find_package(Python3 REQUIRED COMPONENTS Interpreter Development)
 include_directories(
   ${TORCH_INCLUDE_DIRS}
   ${Python3_INCLUDE_DIRS}
+  include
 )
 
 # Create PyTorch extension module (instead of pybind11_add_module)
