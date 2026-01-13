@@ -1,0 +1,11 @@
+Scenes from McGuire Computer Graphics Archive (https://casual-effects.com/data/):
+ - Bedroom by fhernand (Originally published at https://sketchfab.com/3d-models/bedroom-869e6ec859a84240b9a099ae829f47fa#)
+ - Conference Room by Anat Grynberg and Greg Ward
+ - Living Room by Jay-Artist (Originally  published at https://blendswap.com/blend/5014)
+ - Salle de Bain by nacimus 
+
+Blender demo files (https://www.blender.org/download/demo-files/):
+ - Classroom by Christophe Seux
+
+TurboSquid files (https://www.turbosquid.com/):
+ - Anime School Room by Okhey (https://www.turbosquid.com/3d-models/3d-animes-model-1529885)

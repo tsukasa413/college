@@ -1,0 +1,48 @@
+
+.DS_Store
+# --- ROS 2 (Colcon) Build Artifacts ---
+# ビルド、インストール、ログのディレクトリは必須で除外します
+build/
+install/
+log/
+
+# --- Python ---
+# Pythonのキャッシュやコンパイル済みファイル
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+
+# --- C++ / CMake ---
+# ソースディレクトリ内でビルドしてしまった場合の一時ファイル
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+*.cmake
+!CMakeLists.txt
+
+# --- IDE / Editors ---
+# VS Code
+.vscode/
+*.code-workspace
+
+# Vim / Emacs
+*~
+*.swp
+*.swo
+
+# --- OS Generated ---
+.DS_Store
+Thumbs.db
+
+# --- Others ---
+# 秘密鍵や環境変数ファイル（間違って上げないように）
+*.pem
+.env
+
+sphere-stereo/.venv/
