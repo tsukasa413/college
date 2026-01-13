@@ -28,6 +28,13 @@ Warranty: KAIST-VCLAB MAKES NO REPRESENTATIONS OR WARRANTIES ABOUT THE SUITABILI
 Please refer to license.txt for more details.
 =======================================================================
 **/
+
+#include "vec_utils.cuh"
+
+#ifndef PI
+#define PI 3.14159265f
+#endif
+
 struct Intrinsics
 {
     float2 fl, principal;
@@ -53,7 +60,7 @@ inline __device__ float3 matMul3x3(const float r[3][3], float3 vect)
  * Linear interpolation and type conversion in image. 
  * Does not perform out of image boundaries check.
  */
-inline __device__ float3 interp(const uchar3* sampled, float2 uv, int columns = COLS)
+inline __device__ float3 interp(const uchar3* sampled, float2 uv, int columns)
 {
 	int u1, u2, v1, v2;
 	u1 = __float2int_rd(uv.x);
@@ -86,7 +93,7 @@ inline __device__ float3 interp(const uchar3* sampled, float2 uv, int columns = 
  * Linear interpolation and type conversion in float map. 
  * Does not perform out of image boundaries check.
  */
- inline __device__ float interpF(const float* sampled, float2 uv, int columns = COLS)
+ inline __device__ float interpF(const float* sampled, float2 uv, int columns)
 {
 	int u1, u2, v1, v2;
 	u1 = __float2int_rd(uv.x);
@@ -179,13 +186,13 @@ inline __device__ float2 project(float3 point, Intrinsics calib, bool& valid)
  * translation: pointer to the translation from the reference view point to the camera
  */
 extern "C" __global__ void reprojectDistanceKernel(const float* distanceIn, float* distanceOut, 
-    const Intrinsics* calib, const float3* translation)
+    const Intrinsics* calib, const float3* translation, int cols, int rows)
 {
     int indexIn = blockIdx.x * blockDim.x + threadIdx.x;
 
-    if(indexIn < COLS * ROWS)
+    if(indexIn < cols * rows)
     {
-        float2 pixel = {float(indexIn % COLS), float(indexIn / COLS)}; 
+        float2 pixel = {float(indexIn % cols), float(indexIn / cols)};
 
         // Find the corresponding 3D point w.r.t the reference view point
         float3 pt = unproject(pixel, *calib);
@@ -195,8 +202,7 @@ extern "C" __global__ void reprojectDistanceKernel(const float* distanceIn, floa
         float2 outPx = project(pt, *calib);
         
         float distance = length(pt);
-        int indexOut = __float2int_rn(outPx.y) * COLS + __float2int_rn(outPx.x);
-
+        int indexOut = __float2int_rn(outPx.y) * cols + __float2int_rn(outPx.x);
         // Set the distance using z-buffering
         if (distance < distanceOut[indexOut])
             distanceOut[indexOut] = distance;
@@ -210,20 +216,19 @@ extern "C" __global__ void reprojectDistanceKernel(const float* distanceIn, floa
  * translation: pointer to the translation from the reference view point to the camera
  */
  extern "C" __global__ void createInpaintingWeightsKernel(uchar2* inpaintDirWeights, 
-    const Intrinsics* calib, const float3* translation)
+    const Intrinsics* calib, const float3* translation, int cols, int rows, float min_dist, float max_dist)
 {
     int indexIn = blockIdx.x * blockDim.x + threadIdx.x;
 
-    if(indexIn < COLS * ROWS)
+    if(indexIn < cols * rows)
     {
-        float2 pixel = {float(indexIn % COLS), float(indexIn / COLS)}; 
+        float2 pixel = {float(indexIn % cols), float(indexIn / cols)};
 
         // Obtain inpainting direction v_{T*} (see Section 3.3)
         float3 unit = unproject(pixel, *calib);
 
-        float2 pxClose = project(MIN_DIST * unit - *translation, *calib);
-        float2 pxFar = project(MAX_DIST * unit - *translation, *calib);
-        
+        float2 pxClose = project(min_dist * unit - *translation, *calib);
+        float2 pxFar = project(max_dist * unit - *translation, *calib);
         float2 inpaintDir = pxFar - pxClose;
         inpaintDir = inpaintDir / length(inpaintDir);
 
@@ -280,15 +285,16 @@ extern "C" __global__ void reprojectDistanceKernel(const float* distanceIn, floa
  * distanceMap: Reprojected distance map with occlusion-holes
  * inpaintDirWeights: Encoding for a two-pixels inpainting kernel.
  */
- extern "C" __global__ void inpaintKernel(float* distanceMap, const uchar2* inpaintDirWeights)
+extern "C" __global__ void inpaintKernel(float* distanceMap, const uchar2* inpaintDirWeights, 
+    int cols, int rows, float max_dist)
 {
     int indexIn = blockIdx.x * blockDim.x + threadIdx.x;
 
-    if(indexIn < COLS * ROWS && distanceMap[indexIn] >= MAX_DIST + 0.1)
+    if(indexIn < cols * rows && distanceMap[indexIn] >= max_dist + 0.1)
     {
-        int2 currentPixel = {indexIn % COLS, indexIn / COLS}; 
+        int2 currentPixel = {indexIn % cols, indexIn / cols};
         
-        if (currentPixel.x < COLS - 1 && currentPixel.y < ROWS - 1 && currentPixel.y >= 1 && currentPixel.x >= 1)
+        if (currentPixel.x < cols - 1 && currentPixel.y < rows - 1 && currentPixel.y >= 1 && currentPixel.x >= 1)
         {
             // Decode the two neighbour pixels of the inpainting table
             uchar2 dirWeights = inpaintDirWeights[indexIn];
@@ -307,8 +313,8 @@ extern "C" __global__ void reprojectDistanceKernel(const float* distanceIn, floa
             float weightSum(0.f);
             for(int s(0); s < 2; s++)
             { 
-                float sampledDistance = distanceMap[neighbours[s].y * COLS + neighbours[s].x];
-                if(sampledDistance <= MAX_DIST + 0.1f && weights[s] > 0.f)
+                float sampledDistance = distanceMap[neighbours[s].y * cols + neighbours[s].x];
+                if(sampledDistance <= max_dist + 0.1f && weights[s] > 0.f)
                 {
                     distanceVal += weights[s] * sampledDistance;
                     weightSum += weights[s];
@@ -322,8 +328,6 @@ extern "C" __global__ void reprojectDistanceKernel(const float* distanceIn, floa
     }
 }
 
-#define PI 3.14159265
-
 /**
  * Compute the sampling location and blending weight for a pixel in the panorama
  * samplingLut: [REFERENCES_COUNT, PANO_ROWS, PANO_COLS] Output pixel coordinates 
@@ -336,16 +340,17 @@ extern "C" __global__ void reprojectDistanceKernel(const float* distanceIn, floa
  * translations: Set of REFERENCES_COUNT translations from the reference view point to the cameras
  */
  extern "C" __global__ void createBlendingLutKernel(float2* samplingLut, float* blendingWeights, 
-	float* masks, const Intrinsics* calibs, const Rotation* rotations, const float3* translations)
+	float* masks, const Intrinsics* calibs, const Rotation* rotations, const float3* translations,
+	int pano_cols, int pano_rows, int cols, int rows, int references_count, float min_dist, float max_dist)
 {
 	int indexIn = blockIdx.x * blockDim.x + threadIdx.x;
 
-    if(indexIn < PANO_ROWS * PANO_COLS)
+    if(indexIn < pano_rows * pano_cols)
     {
         // Get the sphere point corresponding to the current pixel
-        float2 pixel = {float(indexIn % PANO_COLS), float(indexIn / PANO_COLS)}; 
-        float phi = (float(pixel.y) + 0.5f) * PI / PANO_ROWS - PI / 2.f;
-        float theta = (float(pixel.x) + 0.5f) * 2.f * PI / PANO_COLS + PI;
+        float2 pixel = {float(indexIn % pano_cols), float(indexIn / pano_cols)};
+        float phi = (float(pixel.y) + 0.5f) * 3.14159265f / pano_rows - 3.14159265f / 2.f;
+        float theta = (float(pixel.x) + 0.5f) * 2.f * 3.14159265f / pano_cols + 3.14159265f;
         float3 unitPointPanorama = 
         {
             cosf(phi) * sinf(theta),
@@ -353,32 +358,32 @@ extern "C" __global__ void reprojectDistanceKernel(const float* distanceIn, floa
             cosf(phi) * cosf(theta)
         };
 
-        float blendingWeight[REFERENCES_COUNT];
+        float blendingWeight[32]; // Max references
         float blendingWeightSum = 0.f;
-        for(int referenceIndex = 0; referenceIndex < REFERENCES_COUNT; referenceIndex++)
+        for(int referenceIndex = 0; referenceIndex < references_count; referenceIndex++)
         {
             float3 unitInFisheye = matMul3x3(rotations[referenceIndex].r, unitPointPanorama);
             
             // Evaluate the sampling location for this camera
             bool valid = true;
             float2 uv = project(unitInFisheye, calibs[referenceIndex], valid);
-            uv.x = min(max(uv.x, 0.1f), float(COLS) - 1.1f);
-            uv.y = min(max(uv.y, 0.1f), float(ROWS) - 1.1f);
-            samplingLut[referenceIndex * PANO_ROWS * PANO_COLS + indexIn] = uv;
+            uv.x = min(max(uv.x, 0.1f), float(cols) - 1.1f);
+            uv.y = min(max(uv.y, 0.1f), float(rows) - 1.1f);
+            samplingLut[referenceIndex * pano_rows * pano_cols + indexIn] = uv;
 
             // Evaluate the sampling location displacement for a given change in distance
             blendingWeight[referenceIndex] = 1e-8;
             
-            float2 pxNear = project(MIN_DIST * unitInFisheye - translations[referenceIndex], 
+            float2 pxNear = project(min_dist * unitInFisheye - translations[referenceIndex], 
                 calibs[referenceIndex], valid);
-            pxNear.x = min(max(pxNear.x, 0.1f), float(COLS) - 1.1f);
-            pxNear.y = float(referenceIndex * ROWS) + min(max(pxNear.y, 0.1f), float(ROWS) - 1.1f);
-            float2 pxFar = project(MAX_DIST * unitInFisheye - translations[referenceIndex], 
+            pxNear.x = min(max(pxNear.x, 0.1f), float(cols) - 1.1f);
+            pxNear.y = float(referenceIndex * rows) + min(max(pxNear.y, 0.1f), float(rows) - 1.1f);
+            float2 pxFar = project(max_dist * unitInFisheye - translations[referenceIndex], 
                 calibs[referenceIndex], valid);
-            pxFar.x = min(max(pxFar.x, 0.1f), float(COLS) - 1.1f);
-            pxFar.y = float(referenceIndex * ROWS) + min(max(pxFar.y, 0.1f), float(ROWS) - 1.1f);
+            pxFar.x = min(max(pxFar.x, 0.1f), float(cols) - 1.1f);
+            pxFar.y = float(referenceIndex * rows) + min(max(pxFar.y, 0.1f), float(rows) - 1.1f);
 
-            if(valid && interpF(masks, pxNear) > 0.99 && interpF(masks, pxFar) > 0.99)
+            if(valid && interpF(masks, pxNear, cols) > 0.99 && interpF(masks, pxFar, cols) > 0.99)
             {
 
                 float2 displacementVector(pxFar - pxNear);
@@ -386,15 +391,15 @@ extern "C" __global__ void reprojectDistanceKernel(const float* distanceIn, floa
 
                 // Compute warp-aware blending weights to merge fisheye images
                 blendingWeight[referenceIndex] = 
-                    expf(-displacementStrength * displacementStrength / (1e-4 * ROWS * COLS));
+                    expf(-displacementStrength * displacementStrength / (1e-4 * rows * cols));
             }
 
             blendingWeightSum += blendingWeight[referenceIndex];
         }
 
-        for(int referenceIndex = 0; referenceIndex < REFERENCES_COUNT; referenceIndex++)
+        for(int referenceIndex = 0; referenceIndex < references_count; referenceIndex++)
         {
-            blendingWeights[referenceIndex * PANO_ROWS * PANO_COLS + indexIn] = 
+            blendingWeights[referenceIndex * pano_rows * pano_cols + indexIn] = 
                 blendingWeight[referenceIndex] / blendingWeightSum;
         }
     }
@@ -425,29 +430,30 @@ extern "C" __global__ void mergeRGBDPanoramaKernel(
     const float* reprojectedDistanceMaps, const float* distanceMaps, 
     const uchar3* stitchingImgs, int stitchingImgsRows, int stitchingImgsCols, 
     const float3* translations, const Intrinsics* calibs, 
-    float* DistancePanorama, uchar3* RGBPanorama)
+    float* DistancePanorama, uchar3* RGBPanorama,
+    int pano_cols, int pano_rows, int cols, int rows, int references_count)
 {
 	int indexIn = blockIdx.x * blockDim.x + threadIdx.x;
 
-    if(indexIn < PANO_ROWS * PANO_COLS)
+    if(indexIn < pano_rows * pano_cols)
     {
         float avgInvDistance = 0.f;
         float3 RGB = {0.f, 0.f, 0.f};
     
-        for(int referenceIndex = 0; referenceIndex < REFERENCES_COUNT; referenceIndex++)
+        for(int referenceIndex = 0; referenceIndex < references_count; referenceIndex++)
         {
             // Read blending LuTs
-            float blendingWeight = blendingWeights[referenceIndex * PANO_ROWS * PANO_COLS + indexIn];
-            float2 uv = samplingLut[referenceIndex * PANO_ROWS * PANO_COLS + indexIn];
+            float blendingWeight = blendingWeights[referenceIndex * pano_rows * pano_cols + indexIn];
+            float2 uv = samplingLut[referenceIndex * pano_rows * pano_cols + indexIn];
             
             // Sample and reprojected distance and update the blended output distance
             float reprojectedDistance = interpF(reprojectedDistanceMaps, 
-                uv + make_float2(0.f, float(referenceIndex * ROWS)));
+                uv + make_float2(0.f, float(referenceIndex * rows)), cols);
             avgInvDistance += blendingWeight * 1.f / reprojectedDistance;
                 
             
             float distanceForColorReprojection = interpF(distanceMaps, 
-                uv + make_float2(0.f, float(referenceIndex * ROWS)));
+                uv + make_float2(0.f, float(referenceIndex * rows)), cols);
             distanceForColorReprojection = min(reprojectedDistance, distanceForColorReprojection);
 
             // Find the corresponding 3D point w.r.t the reference view point
@@ -458,7 +464,7 @@ extern "C" __global__ void mergeRGBDPanoramaKernel(
             float2 rgbUV = project(pt, calibs[referenceIndex]);
 
             // Scale as the stitching colour images may have a different resolution
-            float2 stitchingCalibRatio = {float(stitchingImgsCols) / COLS, float(stitchingImgsRows) / ROWS}; 
+            float2 stitchingCalibRatio = {float(stitchingImgsCols) / cols, float(stitchingImgsRows) / rows}; 
             rgbUV = rgbUV * stitchingCalibRatio;
             rgbUV.x = min(max(rgbUV.x, 0.1f), float(stitchingImgsCols) - 1.1f);
             rgbUV.y = min(max(rgbUV.y, 0.1f), float(stitchingImgsRows) - 1.1f);
