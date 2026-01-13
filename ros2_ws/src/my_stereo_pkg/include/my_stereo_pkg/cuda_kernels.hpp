@@ -1,185 +1,174 @@
 #pragma once
 
-#include <vector>
-#include <memory>
 #include <torch/torch.h>
+#include <cuda_runtime.h>
+#include <vector_types.h>
+#include <vector>
 
-namespace my_stereo_pkg {
+// CUDA構造体の定義 (stitcher.cuと同じ)
 
-/**
- * Intrinsics structure matching the CUDA kernel definition
- * Based on the Double Sphere Camera Model (https://arxiv.org/abs/1807.08957)
- */
-struct Intrinsics {
-    float2 fl;         // focal length (x, y)
-    float2 principal;  // principal point (x, y)  
-    float xi;          // xi parameter of double sphere model
-    float alpha;       // alpha parameter of double sphere model
+struct Intrinsics
+{
+    float2 fl, principal;
+    float xi, alpha;
 };
 
-/**
- * Camera calibration parameters for a single camera
- */
-struct CameraCalibration {
+struct Rotation
+{
+    float r[3][3];
+};
+
+// 回転パラメータをラップする構造体
+struct RotationParams
+{
+    Rotation rotation;
+};
+
+// カメラパラメータをまとめて扱う構造体
+struct CamParams
+{
     Intrinsics intrinsics;
-    torch::Tensor rotation_matrix;     // 3x3 rotation matrix
-    torch::Tensor translation_vector;  // 3x1 translation vector
-    float matching_scale;              // scale factor for matching resolution
+    Rotation rotation;
+    float3 translation;
 };
 
-/**
- * Resolution structure for different image sizes
- */
-struct Resolution {
-    int cols;  // width
-    int rows;  // height
-    
-    Resolution() : cols(0), rows(0) {}
-    Resolution(int w, int h) : cols(w), rows(h) {}
-};
+// CUDAカーネルのラッパー関数宣言
 
 /**
- * Complete stitcher parameters structure
- * Contains all parameters needed for sphere sweeping stereo stitching
+ * Reproject distance map from one camera to reference viewpoint
+ * @param distance_in Input distance map tensor [H, W]
+ * @param distance_out Output distance map tensor [H, W] (modified in-place)
+ * @param intrinsics Camera intrinsics
+ * @param translation Translation from reference to camera [3]
+ * @param cols Image width
+ * @param rows Image height
  */
-struct StitcherParams {
-    // Camera parameters
-    std::vector<CameraCalibration> calibrations;
-    torch::Tensor reprojection_viewpoint;  // [3] reference viewpoint
-    
-    // Distance parameters
-    float min_dist;
-    float max_dist;
-    
-    // Resolution parameters
-    Resolution matching_resolution;        // resolution for matching computation
-    Resolution rgb_to_stitch_resolution;  // resolution for RGB stitching
-    Resolution panorama_resolution;       // output panorama resolution
-    
-    // Processing parameters
-    int smoothing_radius;        // blending smoothing radius (default: 15)
-    int inpainting_iterations;   // number of inpainting iterations (default: 32)
-    int block_size;              // CUDA block size (default: 256)
-    
-    // GPU parameters
-    torch::Device device;
-    
-    // Computed grid sizes
-    int fisheye_grid_size;
-    int panorama_grid_size;
-    
-    // Constructor with default values
-    StitcherParams(
-        const std::vector<CameraCalibration>& cams,
-        const torch::Tensor& viewpoint,
-        float min_distance,
-        float max_distance,
-        const Resolution& matching_res,
-        const Resolution& rgb_res, 
-        const Resolution& pano_res,
-        const torch::Device& dev,
-        int smooth_radius = 15,
-        int inpaint_iters = 32,
-        int block_sz = 256
-    ) : calibrations(cams),
-        reprojection_viewpoint(viewpoint),
-        min_dist(min_distance),
-        max_dist(max_distance), 
-        matching_resolution(matching_res),
-        rgb_to_stitch_resolution(rgb_res),
-        panorama_resolution(pano_res),
-        smoothing_radius(smooth_radius),
-        inpainting_iterations(inpaint_iters),
-        block_size(block_sz),
-        device(dev) {
-        
-        // Calculate grid sizes for CUDA kernels
-        int matching_pixels = matching_resolution.cols * matching_resolution.rows;
-        int panorama_pixels = panorama_resolution.cols * panorama_resolution.rows;
-        fisheye_grid_size = (matching_pixels + block_size - 1) / block_size;
-        panorama_grid_size = (panorama_pixels + block_size - 1) / panorama_grid_size;
-    }
-};
+at::Tensor launch_reproject_distance(
+    const at::Tensor& distance_in,
+    const at::Tensor& distance_out,
+    const Intrinsics& intrinsics,
+    const at::Tensor& translation,
+    int cols,
+    int rows
+);
 
 /**
- * CUDA kernel launch functions
+ * Create inpainting weight lookup table
+ * @param inpaint_weights Output inpainting weights tensor [H, W, 2] uint8
+ * @param intrinsics Camera intrinsics
+ * @param translation Translation from reference to camera [3]
+ * @param cols Image width
+ * @param rows Image height
+ * @param min_dist Minimum distance
+ * @param max_dist Maximum distance
  */
-
-// Reproject distance map to reference viewpoint 
-void launch_reproject_distance_kernel(
-    const torch::Tensor& distance_in,
-    torch::Tensor& distance_out,
-    const Intrinsics& calibration,
-    const torch::Tensor& translation,
-    const StitcherParams& params
+at::Tensor launch_create_inpainting_weights(
+    const at::Tensor& inpaint_weights,
+    const Intrinsics& intrinsics,
+    const at::Tensor& translation,
+    int cols,
+    int rows,
+    float min_dist,
+    float max_dist
 );
 
-// Create inpainting weights for hole filling
-void launch_create_inpainting_weights_kernel(
-    torch::Tensor& inpainting_weights,
-    const Intrinsics& calibration,
-    const torch::Tensor& translation,
-    const StitcherParams& params
+/**
+ * Apply inpainting to fill holes in distance map
+ * @param distance_map Distance map tensor [H, W] (modified in-place)
+ * @param inpaint_weights Inpainting weight lookup table [H, W, 2] uint8
+ * @param cols Image width
+ * @param rows Image height
+ * @param max_dist Maximum distance
+ */
+at::Tensor launch_inpaint(
+    const at::Tensor& distance_map,
+    const at::Tensor& inpaint_weights,
+    int cols,
+    int rows,
+    float max_dist
 );
 
-// Apply inpainting to fill holes in distance map
-void launch_inpaint_kernel(
-    torch::Tensor& distance_map,
-    const torch::Tensor& inpainting_weights,
-    const StitcherParams& params
-);
-
-// Create blending lookup tables for panorama stitching
-void launch_create_blending_lut_kernel(
-    torch::Tensor& sampling_lut,
-    torch::Tensor& blending_weights,
-    const torch::Tensor& masks,
+/**
+ * Create blending lookup table for panorama stitching
+ * @param sampling_lut Output sampling coordinates [num_cams, pano_h, pano_w, 2]
+ * @param blending_weights Output blending weights [num_cams, pano_h, pano_w]
+ * @param masks Camera masks [num_cams, H, W]
+ * @param calibrations Vector of camera intrinsics
+ * @param rotations Vector of rotation parameters
+ * @param translations Translations tensor [num_cams * 3]
+ * @param pano_cols Panorama width
+ * @param pano_rows Panorama height
+ * @param cols Image width
+ * @param rows Image height
+ * @param min_dist Minimum distance
+ * @param max_dist Maximum distance
+ */
+std::pair<at::Tensor, at::Tensor> launch_create_blending_lut(
+    const at::Tensor& sampling_lut,
+    const at::Tensor& blending_weights,
+    const at::Tensor& masks,
     const std::vector<Intrinsics>& calibrations,
-    const torch::Tensor& rotations,
-    const torch::Tensor& translations,
-    const StitcherParams& params
-);
-
-// Main stitching kernel to merge RGB-D fisheye images into panorama
-void launch_merge_rgbd_panorama_kernel(
-    const torch::Tensor& sampling_lut,
-    const torch::Tensor& blending_weights,
-    const torch::Tensor& reprojected_distance_maps,
-    const torch::Tensor& distance_maps,
-    const torch::Tensor& stitching_images,
-    const torch::Tensor& translations,
-    const std::vector<Intrinsics>& calibrations,
-    torch::Tensor& distance_panorama,
-    torch::Tensor& rgb_panorama,
-    const StitcherParams& params
-);
-
-// Main stitching function - high level API
-void launch_stitch_kernel(
-    const std::vector<torch::Tensor>& rgb_images,
-    const std::vector<torch::Tensor>& distance_maps,
-    torch::Tensor& rgb_panorama_out,
-    torch::Tensor& distance_panorama_out,
-    const StitcherParams& params
+    const std::vector<RotationParams>& rotations,
+    const at::Tensor& translations,
+    int pano_cols, int pano_rows,
+    int cols, int rows,
+    float min_dist, float max_dist
 );
 
 /**
- * Utility functions
+ * Merge multiple RGBD images into panorama
+ * @param sampling_lut Sampling coordinates [num_cams, pano_h, pano_w, 2]
+ * @param blending_weights Blending weights [num_cams, pano_h, pano_w]
+ * @param reprojected_distance_maps Reprojected distance maps [num_cams, H, W]
+ * @param distance_maps Original distance maps [num_cams, H, W]
+ * @param stitching_imgs Input RGB images [num_cams, img_h, img_w, 3]
+ * @param translations Translations tensor [num_cams * 3]
+ * @param calibrations Vector of camera intrinsics
+ * @param distance_panorama Output distance panorama [pano_h, pano_w]
+ * @param rgb_panorama Output RGB panorama [pano_h, pano_w, 3]
+ * @param pano_cols Panorama width
+ * @param pano_rows Panorama height
+ * @param cols Distance map width
+ * @param rows Distance map height
+ * @param stitching_imgs_rows RGB image height
+ * @param stitching_imgs_cols RGB image width
  */
-
-// Convert calibration parameters to Intrinsics struct
-Intrinsics create_intrinsics(
-    const torch::Tensor& focal_length,      // [2] (fx, fy)
-    const torch::Tensor& principal_point,   // [2] (cx, cy)
-    float xi,
-    float alpha,
-    float matching_scale = 1.0f
+std::pair<at::Tensor, at::Tensor> launch_merge_rgbd_panorama(
+    const at::Tensor& sampling_lut,
+    const at::Tensor& blending_weights,
+    const at::Tensor& reprojected_distance_maps,
+    const at::Tensor& distance_maps,
+    const at::Tensor& stitching_imgs,
+    const at::Tensor& translations,
+    const std::vector<Intrinsics>& calibrations,
+    const at::Tensor& distance_panorama,
+    const at::Tensor& rgb_panorama,
+    int pano_cols, int pano_rows,
+    int cols, int rows,
+    int stitching_imgs_rows, int stitching_imgs_cols
 );
 
-// Create vectorized calibration for CUDA kernels (matches vectorize_calibration in Python)
-torch::Tensor vectorize_calibration(
-    const Intrinsics& calibration,
-    const torch::Device& device
+// ヘルパー関数
+
+/**
+ * Convert camera parameters from torch tensors
+ * @param intrinsics_tensor Intrinsics tensor [fx, fy, cx, cy, xi, alpha]
+ * @param rotation_tensor Rotation tensor [3, 3]
+ * @param translation_tensor Translation tensor [3]
+ * @return CamParams structure
+ */
+CamParams tensor_to_cam_params(
+    const at::Tensor& intrinsics_tensor,
+    const at::Tensor& rotation_tensor,
+    const at::Tensor& translation_tensor
 );
 
-} // namespace my_stereo_pkg
+/**
+ * Check if CUDA is available and set device
+ * @return true if CUDA is available
+ */
+bool check_cuda_availability();
+
+// Constants (should match stitcher.cu defines)
+constexpr float MIN_DIST = 0.1f;
+constexpr float MAX_DIST = 100.0f;

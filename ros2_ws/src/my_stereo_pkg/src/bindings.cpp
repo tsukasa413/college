@@ -1,7 +1,61 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
+#include <pybind11/stl.h>
 #include <torch/torch.h>
+#include <torch/extension.h>
 #include <iostream>
+#include "my_stereo_pkg/cuda_kernels.hpp"
+#include "my_stereo_pkg/calibration.hpp"
+#include "my_stereo_pkg/stitcher.hpp"
+
+namespace py = pybind11;
+using namespace my_stereo;
+
+// Custom type casters for CUDA vector types
+namespace pybind11 { namespace detail {
+    template <> struct type_caster<float2> {
+    public:
+        PYBIND11_TYPE_CASTER(float2, _("float2"));
+        
+        bool load(handle src, bool) {
+            if (!py::isinstance<py::tuple>(src) && !py::isinstance<py::list>(src)) {
+                return false;
+            }
+            auto seq = py::reinterpret_borrow<py::sequence>(src);
+            if (seq.size() != 2) return false;
+            
+            value.x = seq[0].cast<float>();
+            value.y = seq[1].cast<float>();
+            return true;
+        }
+        
+        static handle cast(float2 src, return_value_policy, handle) {
+            return py::make_tuple(src.x, src.y).release();
+        }
+    };
+    
+    template <> struct type_caster<float3> {
+    public:
+        PYBIND11_TYPE_CASTER(float3, _("float3"));
+        
+        bool load(handle src, bool) {
+            if (!py::isinstance<py::tuple>(src) && !py::isinstance<py::list>(src)) {
+                return false;
+            }
+            auto seq = py::reinterpret_borrow<py::sequence>(src);
+            if (seq.size() != 3) return false;
+            
+            value.x = seq[0].cast<float>();
+            value.y = seq[1].cast<float>();
+            value.z = seq[2].cast<float>();
+            return true;
+        }
+        
+        static handle cast(float3 src, return_value_policy, handle) {
+            return py::make_tuple(src.x, src.y, src.z).release();
+        }
+    };
+}} // namespace pybind11::detail
 
 // Helper function to convert numpy to torch tensor
 torch::Tensor numpy_to_torch(pybind11::array_t<float> input) {
@@ -48,4 +102,116 @@ void test_connection(pybind11::array_t<float> np_input) {
 PYBIND11_MODULE(_core_cpp, m) {
     m.doc() = "My Stereo Package C++ Core Module with PyTorch support";
     m.def("test_connection", &test_connection, "Test connection with numpy->torch conversion");
+    
+    // Calibration struct binding
+    py::class_<Calibration>(m, "Calibration")
+        .def(py::init<>())
+        .def_readwrite("fl", &Calibration::fl, "Focal length (fx, fy)")
+        .def_readwrite("principal", &Calibration::principal, "Principal point (cx, cy)")
+        .def_readwrite("xi", &Calibration::xi, "First distortion parameter")
+        .def_readwrite("alpha", &Calibration::alpha, "Second distortion parameter")
+        .def_readwrite("matching_scale", &Calibration::matching_scale, "Scale factor for matching resolution")
+        .def_readwrite("rt", &Calibration::rt, "Extrinsic matrix [4, 4]");
+    
+    // Stitcher class binding
+    py::class_<Stitcher>(m, "Stitcher")
+        .def(py::init<
+            const std::vector<Calibration>&,  // calibrations
+            const at::Tensor&,                 // reprojection_viewpoint
+            const at::Tensor&,                 // masks
+            float,                             // min_dist
+            float,                             // max_dist
+            int,                               // matching_cols
+            int,                               // matching_rows
+            int,                               // rgb_to_stitch_cols
+            int,                               // rgb_to_stitch_rows
+            int,                               // panorama_cols
+            int,                               // panorama_rows
+            const at::Device&,                 // device
+            int,                               // smoothing_radius (default: 15)
+            int                                // inpainting_iterations (default: 32)
+        >(),
+        py::arg("calibrations"),
+        py::arg("reprojection_viewpoint"),
+        py::arg("masks"),
+        py::arg("min_dist"),
+        py::arg("max_dist"),
+        py::arg("matching_cols"),
+        py::arg("matching_rows"),
+        py::arg("rgb_to_stitch_cols"),
+        py::arg("rgb_to_stitch_rows"),
+        py::arg("panorama_cols"),
+        py::arg("panorama_rows"),
+        py::arg("device"),
+        py::arg("smoothing_radius") = 15,
+        py::arg("inpainting_iterations") = 32,
+        "Create RGB-D panorama stitcher for fisheye cameras")
+        .def("stitch", &Stitcher::stitch,
+            py::arg("images"),
+            py::arg("distance_maps"),
+            "Stitch fisheye images and distance maps into RGB-D panorama\n\n"
+            "Args:\n"
+            "    images: List of [H, W, 3] uint8 color fisheye images\n"
+            "    distance_maps: List of [H, W] float32 distance maps\n\n"
+            "Returns:\n"
+            "    Tuple of (RGB panorama [H, W, 3] uint8, distance panorama [H, W] float32)");
+    
+    // Temporarily comment out CUDA wrapper functions until signatures are fixed
+    /*
+    // CUDA wrapper functions
+    m.def("reproject_distance", &launch_reproject_distance, 
+          "Reproject distance map using z-buffering",
+          py::arg("distance_in"), py::arg("distance_out"), 
+          py::arg("cam_params"), py::arg("translation"),
+          py::arg("cols"), py::arg("rows"));
+    
+    m.def("create_inpainting_weights", &launch_create_inpainting_weights,
+          "Create inpainting weights based on occlusion direction",
+          py::arg("inpaint_weights"), py::arg("cam_params"), 
+          py::arg("translation"), py::arg("cols"), py::arg("rows"),
+          py::arg("min_dist"), py::arg("max_dist"));
+    
+    m.def("inpaint", &launch_inpaint,
+          "Fill holes in distance map using inpainting",
+          py::arg("distance_map"), py::arg("inpaint_weights"),
+          py::arg("cols"), py::arg("rows"), py::arg("max_dist"));
+    
+    m.def("create_blending_lut", &launch_create_blending_lut,
+          "Create sampling and blending lookup tables",
+          py::arg("sampling_lut"), py::arg("blending_weights"),
+          py::arg("masks"), py::arg("cam_params_list"),
+          py::arg("rotations"), py::arg("translations"),
+          py::arg("pano_cols"), py::arg("pano_rows"),
+          py::arg("cols"), py::arg("rows"),
+          py::arg("min_dist"), py::arg("max_dist"));
+    
+    m.def("merge_rgbd_panorama", &launch_merge_rgbd_panorama,
+          "Merge RGBD panorama from multiple cameras",
+          py::arg("sampling_lut"), py::arg("blending_weights"),
+          py::arg("reprojected_distance_maps"), py::arg("distance_maps"),
+          py::arg("stitching_imgs"), py::arg("translations"),
+          py::arg("cam_params_list"), py::arg("distance_panorama"),
+          py::arg("rgb_panorama"), py::arg("pano_cols"), py::arg("pano_rows"),
+          py::arg("cols"), py::arg("rows"),
+          py::arg("stitching_imgs_rows"), py::arg("stitching_imgs_cols"));
+    */
+    
+    // CUDA kernel helper structs
+    py::class_<Intrinsics>(m, "Intrinsics")
+        .def(py::init<>())
+        .def_readwrite("fl", &Intrinsics::fl)
+        .def_readwrite("principal", &Intrinsics::principal)
+        .def_readwrite("xi", &Intrinsics::xi)
+        .def_readwrite("alpha", &Intrinsics::alpha);
+    
+    py::class_<Rotation>(m, "Rotation")
+        .def(py::init<>());
+        
+    py::class_<CamParams>(m, "CamParams")
+        .def(py::init<>())
+        .def_readwrite("intrinsics", &CamParams::intrinsics);
+        
+    py::class_<RotationParams>(m, "RotationParams")
+        .def(py::init<>())
+        .def_readwrite("rotation", &RotationParams::rotation);
 }

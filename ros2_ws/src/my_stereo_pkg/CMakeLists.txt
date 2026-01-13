@@ -1,9 +1,16 @@
 cmake_minimum_required(VERSION 3.8)
 project(my_stereo_pkg)
 
+# Enable CUDA support
+enable_language(CUDA)
+
 # Default to C++17
 if(NOT CMAKE_CXX_STANDARD)
   set(CMAKE_CXX_STANDARD 17)
+endif()
+
+if(NOT CMAKE_CUDA_STANDARD)
+  set(CMAKE_CUDA_STANDARD 17)
 endif()
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -27,10 +34,19 @@ find_package(ament_cmake_python REQUIRED)
 # Find PyTorch 
 set(CMAKE_PREFIX_PATH "/home/motoken/.local/lib/python3.10/site-packages/torch/share/cmake/Torch;${CMAKE_PREFIX_PATH}")
 find_package(Torch REQUIRED)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
+# Don't apply TORCH_CXX_FLAGS globally, only to specific targets
+# set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
 
-# Find CUDA - Temporarily disabled for basic testing  
-# find_package(CUDAToolkit REQUIRED)
+# Find PyTorch Python library for Python bindings
+execute_process(
+  COMMAND ${Python3_EXECUTABLE} -c "import torch; import os; print(os.path.join(os.path.dirname(torch.__file__), 'lib', 'libtorch_python.so'))"
+  OUTPUT_VARIABLE TORCH_PYTHON_LIBRARY
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+message(STATUS "PyTorch Python library: ${TORCH_PYTHON_LIBRARY}")
+
+# Find CUDA
+find_package(CUDAToolkit REQUIRED)
 
 # Find pybind11
 find_package(pybind11 REQUIRED)
@@ -38,14 +54,75 @@ find_package(pybind11 REQUIRED)
 # Find Python
 find_package(Python3 REQUIRED COMPONENTS Interpreter Development)
 
-# Set CUDA architecture for Jetson AGX Orin (Ampere architecture) - Temporarily disabled
-# set(CMAKE_CUDA_ARCHITECTURES 87)
+# Set CUDA architecture for Jetson AGX Orin (Ampere architecture)
+set(CMAKE_CUDA_ARCHITECTURES 87)
 
 # Include directories
 include_directories(
+  include/
   ${TORCH_INCLUDE_DIRS}
   ${Python3_INCLUDE_DIRS}
-  include
+  ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
+)
+
+# Create CUDA kernels library
+add_library(cuda_kernels_lib STATIC
+  src/cuda/stitcher.cu
+  src/cuda_wrapper.cu
+)
+
+# Set properties for CUDA library
+set_target_properties(cuda_kernels_lib PROPERTIES
+  CUDA_STANDARD 17
+  CUDA_STANDARD_REQUIRED ON
+  POSITION_INDEPENDENT_CODE ON
+  CUDA_RESOLVE_DEVICE_SYMBOLS ON
+  CUDA_SEPARABLE_COMPILATION ON
+)
+
+# Set CUDA compilation flags
+target_compile_options(cuda_kernels_lib PRIVATE 
+  $<$<COMPILE_LANGUAGE:CUDA>:-O3>
+  $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math>
+  $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
+  $<$<COMPILE_LANGUAGE:CXX>:${TORCH_CXX_FLAGS}>
+)
+
+# Prevent C++ defines from leaking to CUDA/ptxas
+set_source_files_properties(
+  src/cuda/stitcher.cu
+  src/cuda_wrapper.cu
+  PROPERTIES
+  COMPILE_OPTIONS "-D_GLIBCXX_USE_CXX11_ABI=1"
+)
+
+# Link CUDA libraries to kernels library
+target_link_libraries(cuda_kernels_lib PUBLIC
+  CUDA::cudart
+  ${TORCH_LIBRARIES}
+)
+
+# Create Stitcher C++ library
+add_library(stitcher_lib STATIC
+  src/core/stitcher.cpp
+)
+
+# Set properties for Stitcher library
+set_target_properties(stitcher_lib PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED ON
+  POSITION_INDEPENDENT_CODE ON
+)
+
+# Apply PyTorch C++ flags to Stitcher library
+target_compile_options(stitcher_lib PRIVATE
+  ${TORCH_CXX_FLAGS}
+)
+
+# Link Stitcher library with CUDA kernels and PyTorch
+target_link_libraries(stitcher_lib PUBLIC
+  cuda_kernels_lib
+  ${TORCH_LIBRARIES}
 )
 
 # Create PyTorch extension module (instead of pybind11_add_module)
@@ -64,7 +141,10 @@ set_target_properties(_core_cpp PROPERTIES
 # Link PyTorch libraries 
 target_link_libraries(_core_cpp PRIVATE
   ${TORCH_LIBRARIES}
+  ${TORCH_PYTHON_LIBRARY}
   pybind11::module
+  cuda_kernels_lib
+  stitcher_lib
 )
 
 # Compiler-specific options
