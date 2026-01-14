@@ -29,7 +29,23 @@ Please refer to license.txt for more details.
 =======================================================================
 **/
 
+#include "my_stereo_pkg/cuda_kernels.hpp"
+#include "my_stereo_pkg/vec_utils.cuh"
+#include <torch/torch.h>
+#include <cuda_runtime.h>
+
 #define EPS 0.01f
+
+// CUDA error checking macro
+#define CUDA_CHECK(call) \
+    do { \
+        cudaError_t error = call; \
+        if (error != cudaSuccess) { \
+            fprintf(stderr, "CUDA error at %s:%d: %s\n", __FILE__, __LINE__, \
+                    cudaGetErrorString(error)); \
+            exit(EXIT_FAILURE); \
+        } \
+    } while(0)
 
 /**
  * Edge-preserving downsampling (see Section 3.2.1)
@@ -40,10 +56,11 @@ Please refer to license.txt for more details.
  * costOut: Two-times downscaled cost
  * rowsOut, colsOut: Size of the downscaled image 
  *  should be as close as possible to half of rowsIn, colsIn
+ * candidate_count: Number of depth candidates (replaces CANDIDATE_COUNT macro)
  */
-extern "C" __global__ void guideDownsample2xKernel(
+__global__ void guideDownsample2xKernel(
     const uchar3* guideIn, const float*  costIn, int rowsIn, int colsIn, 
-    uchar3* guideOut, float* costOut, int rowsOut, int colsOut, float varInvI)
+    uchar3* guideOut, float* costOut, int rowsOut, int colsOut, float varInvI, int candidate_count)
 {
     int indexOut = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -93,7 +110,7 @@ extern "C" __global__ void guideDownsample2xKernel(
         guideOut[indexOut] = float3Touchar3(inSumGuide / weightSum);
     
 		// Downsample the cost volume using the previously set coeficients
-        for(int z(0); z < CANDIDATE_COUNT; z++)
+        for(int z(0); z < candidate_count; z++)
         {
             float currentCost = costIn[z * rowsIn * colsIn + y2 * colsIn + x2];
             float neighboursCost[8] = {
@@ -127,10 +144,11 @@ extern "C" __global__ void guideDownsample2xKernel(
  * rowsIn, colsIn: Size of the input
  * guideInOut: Input high resolution guide and output smoothed guide
  * costInOut: Input and output high resolution cost
- * rowsInOut, colsInOut: Size of the upsampled image 
+ * rowsInOut, colsInOut: Size of the upsampled image
+ * candidate_count: Number of depth candidates (replaces CANDIDATE_COUNT macro)
  */
-extern "C" __global__ void guideUpsample2xKernel(const uchar3* guideIn, const float*  costIn, int rowsIn, int colsIn, 
-    uchar3* guideInOut, float* costInOut, int rowsInOut, int colsInOut, float weightUp, float weightDown, float varInvI)
+__global__ void guideUpsample2xKernel(const uchar3* guideIn, const float*  costIn, int rowsIn, int colsIn, 
+    uchar3* guideInOut, float* costInOut, int rowsInOut, int colsInOut, float weightUp, float weightDown, float varInvI, int candidate_count)
 {
     int indexIn = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -267,7 +285,7 @@ extern "C" __global__ void guideUpsample2xKernel(const uchar3* guideIn, const fl
             guideInOut[plusUp.y * colsInOut + plusUp.x] = float3Touchar3(weightSum4 * inSumGuide4);
         
 		// Cost upsampling
-        for(int z(0); z < CANDIDATE_COUNT; z++)
+        for(int z(0); z < candidate_count; z++)
         {
             float neighboursCostDown[3][3] = {
                 {costIn[z * rowsIn * colsIn + minusDown.y * colsIn + minusDown.x],
@@ -327,4 +345,117 @@ extern "C" __global__ void guideUpsample2xKernel(const uchar3* guideIn, const fl
                     ) * weightSum4;
         }    
     }
+}
+
+// ============================================================================
+// C++ Wrapper Functions (LibTorch interface)
+// ============================================================================
+
+// Helper function to get device pointer from tensor
+template<typename T>
+T* get_device_ptr(const at::Tensor& tensor) {
+    TORCH_CHECK(tensor.is_cuda(), "Tensor must be on CUDA device");
+    TORCH_CHECK(tensor.is_contiguous(), "Tensor must be contiguous");
+    return tensor.data_ptr<T>();
+}
+
+void launch_guide_downsample_2x(
+    const at::Tensor& guide_in,
+    const at::Tensor& values_in,
+    const at::Tensor& guide_out,
+    const at::Tensor& values_out,
+    int rowsIn,
+    int colsIn,
+    int rowsOut,
+    int colsOut,
+    int candidate_count,
+    float var_inv_i,
+    float weight_down
+)
+{
+    // Validate inputs
+    TORCH_CHECK(guide_in.is_cuda(), "guide_in must be on CUDA device");
+    TORCH_CHECK(values_in.is_cuda(), "values_in must be on CUDA device");
+    TORCH_CHECK(guide_out.is_cuda(), "guide_out must be on CUDA device");
+    TORCH_CHECK(values_out.is_cuda(), "values_out must be on CUDA device");
+    
+    TORCH_CHECK(guide_in.dtype() == at::kByte, "guide_in must be uint8 tensor");
+    TORCH_CHECK(values_in.dtype() == at::kFloat, "values_in must be float tensor");
+    TORCH_CHECK(guide_out.dtype() == at::kByte, "guide_out must be uint8 tensor");
+    TORCH_CHECK(values_out.dtype() == at::kFloat, "values_out must be float tensor");
+    
+    // Get device pointers
+    const uchar3* d_guide_in = reinterpret_cast<const uchar3*>(get_device_ptr<uint8_t>(guide_in));
+    const float* d_values_in = get_device_ptr<float>(values_in);
+    uchar3* d_guide_out = reinterpret_cast<uchar3*>(get_device_ptr<uint8_t>(guide_out));
+    float* d_values_out = get_device_ptr<float>(values_out);
+    
+    // Calculate grid and block sizes (following Python version: block_size = min(256, max_threads))
+    int num_pixels_out = rowsOut * colsOut;
+    int blockSize = 256;  // Standard block size
+    int gridSize = (num_pixels_out + blockSize - 1) / blockSize;
+    
+    // Launch kernel
+    guideDownsample2xKernel<<<gridSize, blockSize>>>(
+        d_guide_in, d_values_in, rowsIn, colsIn,
+        d_guide_out, d_values_out, rowsOut, colsOut,
+        var_inv_i, candidate_count
+    );
+    
+    // Check for errors
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+void launch_guide_upsample_2x(
+    const at::Tensor& guide_low,
+    const at::Tensor& values_low,
+    const at::Tensor& guide_high,
+    const at::Tensor& values_high,
+    int rowsIn,
+    int colsIn,
+    int rowsOut,
+    int colsOut,
+    int candidate_count,
+    float var_inv_i,
+    float weight_up
+)
+{
+    // Validate inputs
+    TORCH_CHECK(guide_low.is_cuda(), "guide_low must be on CUDA device");
+    TORCH_CHECK(values_low.is_cuda(), "values_low must be on CUDA device");
+    TORCH_CHECK(guide_high.is_cuda(), "guide_high must be on CUDA device");
+    TORCH_CHECK(values_high.is_cuda(), "values_high must be on CUDA device");
+    
+    TORCH_CHECK(guide_low.dtype() == at::kByte, "guide_low must be uint8 tensor");
+    TORCH_CHECK(values_low.dtype() == at::kFloat, "values_low must be float tensor");
+    TORCH_CHECK(guide_high.dtype() == at::kByte, "guide_high must be uint8 tensor");
+    TORCH_CHECK(values_high.dtype() == at::kFloat, "values_high must be float tensor");
+    
+    // Get device pointers
+    const uchar3* d_guide_low = reinterpret_cast<const uchar3*>(get_device_ptr<uint8_t>(guide_low));
+    const float* d_values_low = get_device_ptr<float>(values_low);
+    uchar3* d_guide_high = reinterpret_cast<uchar3*>(get_device_ptr<uint8_t>(guide_high));
+    float* d_values_high = get_device_ptr<float>(values_high);
+    
+    // Calculate weight_down (spatial weight for downsampling)
+    // In the original code, this is computed from sigma_s
+    // For upsampling, we use the same exponential weight
+    float weight_down = weight_up;  // Typically same weight for both directions
+    
+    // Calculate grid and block sizes
+    int num_pixels_in = rowsIn * colsIn;
+    int blockSize = 256;
+    int gridSize = (num_pixels_in + blockSize - 1) / blockSize;
+    
+    // Launch kernel
+    guideUpsample2xKernel<<<gridSize, blockSize>>>(
+        d_guide_low, d_values_low, rowsIn, colsIn,
+        d_guide_high, d_values_high, rowsOut, colsOut,
+        weight_up, weight_down, var_inv_i, candidate_count
+    );
+    
+    // Check for errors
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
 }

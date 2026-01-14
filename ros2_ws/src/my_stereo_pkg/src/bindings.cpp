@@ -7,6 +7,7 @@
 #include "my_stereo_pkg/cuda_kernels.hpp"
 #include "my_stereo_pkg/calibration.hpp"
 #include "my_stereo_pkg/stitcher.hpp"
+#include "my_stereo_pkg/isb_filter.hpp"
 
 namespace py = pybind11;
 using namespace my_stereo;
@@ -155,6 +156,33 @@ PYBIND11_MODULE(_core_cpp, m) {
             "    distance_maps: List of [H, W] float32 distance maps\n\n"
             "Returns:\n"
             "    Tuple of (RGB panorama [H, W, 3] uint8, distance panorama [H, W] float32)");
+    
+    // ISBFilter class binding for edge-preserving cost volume filtering
+    py::class_<my_stereo_pkg::ISBFilter>(m, "ISBFilter")
+        .def(py::init<int, const std::pair<int, int>&, const at::Device&>(),
+            py::arg("candidate_count"),
+            py::arg("resolution"),
+            py::arg("device"),
+            "Create ISB Filter for edge-preserving cost volume aggregation\n\n"
+            "Args:\n"
+            "    candidate_count: Number of depth candidates (cost volume channels)\n"
+            "    resolution: Tuple of (cols, rows) for the image resolution\n"
+            "    device: CUDA device for processing (e.g., torch.device('cuda:0'))")
+        .def("apply", &my_stereo_pkg::ISBFilter::apply,
+            py::arg("guide"),
+            py::arg("cost"),
+            py::arg("sigma_i"),
+            py::arg("sigma_s"),
+            "Apply edge-preserving filter to cost volume\n\n"
+            "Args:\n"
+            "    guide: Guide image [H, W, 3] (uint8) for edge preservation\n"
+            "    cost: Cost volume [candidate_count, H, W] (float32) to be filtered\n"
+            "    sigma_i: Edge preservation parameter (lower = preserve edges more)\n"
+            "    sigma_s: Smoothing parameter (higher = more smoothing from coarse scales)\n\n"
+            "Returns:\n"
+            "    Tuple of (filtered cost volume [candidate_count, H, W], filtered guide [H, W, 3])")
+        .def("get_scale_count", &my_stereo_pkg::ISBFilter::get_scale_count,
+            "Get the number of pyramid scales used");
     
     // Temporarily comment out CUDA wrapper functions until signatures are fixed
     /*

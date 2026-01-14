@@ -169,6 +169,64 @@ CamParams tensor_to_cam_params(
  */
 bool check_cuda_availability();
 
+// ISB Filter CUDA kernel wrappers
+
+/**
+ * Guided downsample 2x with Inverse-Square Bilateral weighting
+ * @param guide_in Input guide image [rowsIn, colsIn, channels]
+ * @param values_in Input values (depth candidates) [candidate_count, rowsIn, colsIn]
+ * @param guide_out Output downsampled guide image [rowsOut, colsOut, channels]
+ * @param values_out Output downsampled values [candidate_count, rowsOut, colsOut]
+ * @param rowsIn Input height
+ * @param colsIn Input width
+ * @param rowsOut Output height (typically rowsIn / 2)
+ * @param colsOut Output width (typically colsIn / 2)
+ * @param candidate_count Number of depth candidates
+ * @param var_inv_i Inverse variance for intensity difference (1 / sigma_i^2)
+ * @param weight_down Spatial weight for downsampling (exp(-dist^2 / sigma_s^2))
+ */
+void launch_guide_downsample_2x(
+    const at::Tensor& guide_in,
+    const at::Tensor& values_in,
+    const at::Tensor& guide_out,
+    const at::Tensor& values_out,
+    int rowsIn,
+    int colsIn,
+    int rowsOut,
+    int colsOut,
+    int candidate_count,
+    float var_inv_i,
+    float weight_down
+);
+
+/**
+ * Guided upsample 2x with Inverse-Square Bilateral weighting
+ * @param guide_low Low-resolution guide image [rowsIn, colsIn, channels]
+ * @param values_low Low-resolution values (depth candidates) [candidate_count, rowsIn, colsIn]
+ * @param guide_high High-resolution guide image [rowsOut, colsOut, channels]
+ * @param values_high Output high-resolution values [candidate_count, rowsOut, colsOut]
+ * @param rowsIn Input height (low-res)
+ * @param colsIn Input width (low-res)
+ * @param rowsOut Output height (high-res, typically rowsIn * 2)
+ * @param colsOut Output width (high-res, typically colsIn * 2)
+ * @param candidate_count Number of depth candidates
+ * @param var_inv_i Inverse variance for intensity difference (1 / sigma_i^2)
+ * @param weight_up Spatial weight for upsampling (exp(-dist^2 / sigma_s^2))
+ */
+void launch_guide_upsample_2x(
+    const at::Tensor& guide_low,
+    const at::Tensor& values_low,
+    const at::Tensor& guide_high,
+    const at::Tensor& values_high,
+    int rowsIn,
+    int colsIn,
+    int rowsOut,
+    int colsOut,
+    int candidate_count,
+    float var_inv_i,
+    float weight_up
+);
+
 // Constants (should match stitcher.cu defines)
 constexpr float MIN_DIST = 0.1f;
 constexpr float MAX_DIST = 100.0f;
