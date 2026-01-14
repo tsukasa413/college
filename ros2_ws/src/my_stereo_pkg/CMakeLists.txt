@@ -68,6 +68,7 @@ include_directories(
 # Create CUDA kernels library
 add_library(cuda_kernels_lib STATIC
   src/cuda/stitcher.cu
+  src/cuda/isb_filter.cu
   src/cuda_wrapper.cu
 )
 
@@ -91,6 +92,7 @@ target_compile_options(cuda_kernels_lib PRIVATE
 # Prevent C++ defines from leaking to CUDA/ptxas
 set_source_files_properties(
   src/cuda/stitcher.cu
+  src/cuda/isb_filter.cu
   src/cuda_wrapper.cu
   PROPERTIES
   COMPILE_OPTIONS "-D_GLIBCXX_USE_CXX11_ABI=1"
@@ -105,6 +107,7 @@ target_link_libraries(cuda_kernels_lib PUBLIC
 # Create Stitcher C++ library
 add_library(stitcher_lib STATIC
   src/core/stitcher.cpp
+  src/core/isb_filter.cpp
 )
 
 # Set properties for Stitcher library
