@@ -133,7 +133,9 @@ std::pair<at::Tensor, at::Tensor> RGBDEstimator::unproject(
     point = (numerator / denominator2) * point;
     
     // point[..., 2] -= xi
-    point.index_put_({"...", 2}, point.index({"...", 2}) - xi);
+    // Use select to ensure correct in-place modification
+    auto point_z = point.select(-1, 2);
+    point_z.sub_(xi);
     
     // valid = (1 - (2*alpha - 1)*r2 >= 0)
     auto valid = (1.0f - two_alpha_minus_1 * r2 >= 0.0f).squeeze(-1);
@@ -244,14 +246,17 @@ void RGBDEstimator::select_camera(const std::vector<at::Tensor>& masks)
         // Initialize with invalid camera index (-1)
         auto selected_camera = -at::ones({1, rows, cols}, 
                                          at::TensorOptions().dtype(at::kInt).device(device_));
-        auto max_displacement = at::ones({1, rows, cols},
-                                         at::TensorOptions().dtype(at::kFloat).device(device_));
+        // Initialize max_displacement to -1.0 to ensure first valid result is selected
+        auto max_displacement = -at::ones({1, rows, cols},
+                                          at::TensorOptions().dtype(at::kFloat).device(device_));
         
         // Create pixel grid
+        // Python: meshgrid([v, u], indexing='ij') then stack([v, u])
+        // C++: meshgrid({v, u}, "ij") gives grid[0]=v, grid[1]=u, then stack({u, v})
         auto u = at::arange(0, cols, at::TensorOptions().dtype(at::kFloat).device(device_));
         auto v = at::arange(0, rows, at::TensorOptions().dtype(at::kFloat).device(device_));
-        auto grid = at::meshgrid({v, u}, "ij");
-        auto uv = at::stack({grid[1], grid[0]}, /*dim=*/-1).unsqueeze(0);  // [1, H, W, 2]
+        auto grid = at::meshgrid({v, u}, "ij");  // grid[0]=v (rows), grid[1]=u (cols)
+        auto uv = at::stack({grid[1], grid[0]}, /*dim=*/-1).unsqueeze(0);  // [1, H, W, 2] as (u, v)
         
         // Unproject to unit vectors
         auto unproject_result = unproject(uv.reshape({-1, 2}), reference_calibration);
@@ -271,9 +276,10 @@ void RGBDEstimator::select_camera(const std::vector<at::Tensor>& masks)
             auto rt = at::matmul(at::inverse(calibration.rt), reference_calibration.rt);
             
             // Convert to homogeneous coordinates and transform
+            // PyTorch matmul handles broadcasting: [1, H, W, 4] @ [4, 4] -> [1, H, W, 4]
             auto ones = at::ones_like(pt_near.index({"...", at::indexing::Slice(at::indexing::None, 1)}));
-            auto pt_near_homo = at::cat({pt_near, ones}, /*dim=*/-1);
-            auto pt_far_homo = at::cat({pt_far, ones}, /*dim=*/-1);
+            auto pt_near_homo = at::cat({pt_near, ones}, /*dim=*/-1);  // [1, H, W, 4]
+            auto pt_far_homo = at::cat({pt_far, ones}, /*dim=*/-1);    // [1, H, W, 4]
             
             pt_near_homo = at::matmul(pt_near_homo, rt.t());
             pt_far_homo = at::matmul(pt_far_homo, rt.t());
@@ -300,7 +306,8 @@ void RGBDEstimator::select_camera(const std::vector<at::Tensor>& masks)
             // Calculate displacement
             auto displacement = at::norm(uv_near - uv_far, 2, /*dim=*/-1);
             
-            // Normalize UV coordinates to [-1, 1] for grid_sample
+            // Normalize UV coordinates to [-1, 1] for grid_sample (align_corners=False)
+            // Python: ((uv + 0.5) / [cols, rows]) * 2 - 1
             auto resolution_tensor = at::tensor({static_cast<float>(cols), static_cast<float>(rows)},
                                                at::TensorOptions().dtype(at::kFloat).device(device_));
             uv_near = ((uv_near + 0.5f) / resolution_tensor) * 2.0f - 1.0f;
@@ -351,10 +358,12 @@ at::Tensor RGBDEstimator::estimate_fisheye_distance(
     int rows = matching_resolution_.second;
     
     // Create pixel grid and unproject to unit vectors
+    // Python: meshgrid([v, u], indexing='ij') then stack([v, u])
+    // C++: meshgrid({v, u}, "ij") gives grid[0]=v, grid[1]=u, then stack({u, v})
     auto u = at::arange(0, cols, at::TensorOptions().dtype(at::kFloat).device(device_));
     auto v = at::arange(0, rows, at::TensorOptions().dtype(at::kFloat).device(device_));
-    auto grid = at::meshgrid({v, u}, "ij");
-    auto uv = at::stack({grid[1], grid[0]}, /*dim=*/-1).unsqueeze(0);
+    auto grid = at::meshgrid({v, u}, "ij");  // grid[0]=v (rows), grid[1]=u (cols)
+    auto uv = at::stack({grid[1], grid[0]}, /*dim=*/-1).unsqueeze(0);  // [1, H, W, 2] as (u, v)
     
     auto unproject_result = unproject(uv.reshape({-1, 2}), reference_calibration);
     auto pt_unit = unproject_result.first.reshape({1, rows, cols, 3});
@@ -374,6 +383,7 @@ at::Tensor RGBDEstimator::estimate_fisheye_distance(
         // Transform points to matched camera coordinate system
         auto rt = at::matmul(at::inverse(calibration.rt), reference_calibration.rt);
         auto ones = at::ones_like(point_volume.index({"...", at::indexing::Slice(at::indexing::None, 1)}));
+        // PyTorch matmul handles broadcasting: [candidate_count, H, W, 4] @ [4, 4] -> [candidate_count, H, W, 4]
         auto point_volume_in_cam = at::matmul(
             at::cat({point_volume, ones}, /*dim=*/-1), rt.t());
         
@@ -383,7 +393,9 @@ at::Tensor RGBDEstimator::estimate_fisheye_distance(
             calibration);
         auto uv_proj = project_result.first.reshape({candidate_count_, rows, cols, 2});
         
-        // Normalize to [-1, 1] for grid_sample
+        // Normalize to [-1, 1] for grid_sample (align_corners=False)
+        // Python: ((uv + 0.5) / [cols, rows]) * 2 - 1
+        // This maps pixel [0, 0] center to [-1 + 1/res, -1 + 1/res]
         auto resolution_tensor = at::tensor({static_cast<float>(cols), static_cast<float>(rows)},
                                            at::TensorOptions().dtype(at::kFloat).device(device_));
         uv_proj = ((uv_proj + 0.5f) / resolution_tensor) * 2.0f - 1.0f;
@@ -488,9 +500,25 @@ std::pair<at::Tensor, at::Tensor> RGBDEstimator::run(
     std::vector<at::Tensor> distance_maps;
     distance_maps.reserve(references_indices_.size());
     
+    std::cout << "\n=== Estimating distance for each reference camera ===" << std::endl;
     for (size_t i = 0; i < references_indices_.size(); ++i) {
         int ref_idx = references_indices_[i];
         const auto& selected_camera = selected_cameras_[i];
+        
+        std::cout << "  Camera " << i << " (ref_idx=" << ref_idx << "):" << std::endl;
+        
+        // Verify calibration uniqueness
+        auto& calib = calibrations_[ref_idx];
+        std::cout << "    RT translation: [" 
+                  << calib.rt[0][3].item<float>() << ", "
+                  << calib.rt[1][3].item<float>() << ", "
+                  << calib.rt[2][3].item<float>() << "]" << std::endl;
+        
+        // Verify selected_camera map has valid selections
+        auto valid_selections = (selected_camera >= 0).sum().item<int>();
+        auto total_pixels = selected_camera.numel();
+        std::cout << "    Selected camera valid pixels: " << valid_selections 
+                  << " / " << total_pixels << std::endl;
         
         // Create YCbCr guide image
         // Matches Python: guide = rgb2yCbCr(images_to_match[reference_index]).type(torch.uint8)
@@ -506,7 +534,35 @@ std::pair<at::Tensor, at::Tensor> RGBDEstimator::run(
             images_to_match_permuted
         );
         
-        distance_maps.push_back(distance_map);
+        // CRITICAL: Ensure distance_map is independent by cloning
+        // This prevents all elements pointing to the same memory
+        auto distance_map_independent = distance_map.clone();
+        
+        // Debug output: verify distance map statistics
+        auto dist_mean = distance_map_independent.mean().item<float>();
+        auto dist_min = distance_map_independent.min().item<float>();
+        auto dist_max = distance_map_independent.max().item<float>();
+        std::cout << "    Distance map stats: mean=" << dist_mean 
+                  << ", min=" << dist_min 
+                  << ", max=" << dist_max << std::endl;
+        
+        distance_maps.push_back(distance_map_independent);
+    }
+    
+    // Verify distance_maps are unique
+    if (distance_maps.size() > 1) {
+        bool all_same = true;
+        for (size_t i = 1; i < distance_maps.size(); ++i) {
+            if (!at::equal(distance_maps[0], distance_maps[i])) {
+                all_same = false;
+                break;
+            }
+        }
+        if (all_same) {
+            std::cerr << "\n⚠️  WARNING: All distance_maps are identical! Bug detected.\n" << std::endl;
+        } else {
+            std::cout << "\n✓ Distance maps are unique for each camera.\n" << std::endl;
+        }
     }
     
     // Prepare images for stitching: convert to uint8
