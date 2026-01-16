@@ -8,6 +8,7 @@
 #include "my_stereo_pkg/calibration.hpp"
 #include "my_stereo_pkg/stitcher.hpp"
 #include "my_stereo_pkg/isb_filter.hpp"
+#include "my_stereo_pkg/depth_estimation.hpp"
 
 namespace py = pybind11;
 using namespace my_stereo;
@@ -183,6 +184,62 @@ PYBIND11_MODULE(_core_cpp, m) {
             "    Tuple of (filtered cost volume [candidate_count, H, W], filtered guide [H, W, 3])")
         .def("get_scale_count", &my_stereo_pkg::ISBFilter::get_scale_count,
             "Get the number of pyramid scales used");
+    
+    // RGBDEstimator class binding - complete RGBD estimation pipeline
+    // Matches Python RGBD_Estimator class from depth_estimation.py
+    py::class_<my_stereo_pkg::RGBDEstimator>(m, "RGBDEstimator")
+        .def(py::init<
+            const std::vector<Calibration>&,   // calibrations
+            float,                              // min_dist
+            float,                              // max_dist
+            int,                                // candidate_count
+            const std::vector<int>&,            // references_indices
+            const at::Tensor&,                  // reprojection_viewpoint
+            const std::vector<at::Tensor>&,     // masks
+            const std::pair<int, int>&,         // matching_resolution
+            const std::pair<int, int>&,         // rgb_to_stitch_resolution
+            const std::pair<int, int>&,         // panorama_resolution
+            float,                              // sigma_i
+            float,                              // sigma_s
+            const at::Device&                   // device
+        >(),
+        py::arg("calibrations"),
+        py::arg("min_dist"),
+        py::arg("max_dist"),
+        py::arg("candidate_count"),
+        py::arg("references_indices"),
+        py::arg("reprojection_viewpoint"),
+        py::arg("masks"),
+        py::arg("matching_resolution"),
+        py::arg("rgb_to_stitch_resolution"),
+        py::arg("panorama_resolution"),
+        py::arg("sigma_i"),
+        py::arg("sigma_s"),
+        py::arg("device"),
+        "Prepare RGB-D estimation from fisheye images (matches Python RGBD_Estimator)\n\n"
+        "Args:\n"
+        "    calibrations: List of camera calibration objects\n"
+        "    min_dist: Minimum distance for sphere sweep volume (meters)\n"
+        "    max_dist: Maximum distance for sphere sweep volume (meters)\n"
+        "    candidate_count: Number of distance candidates in sweep volume\n"
+        "    references_indices: List of camera indices to use as reference views\n"
+        "    reprojection_viewpoint: [3] Reference viewpoint for panorama creation\n"
+        "    masks: List of [1, H, W] validity masks for each camera\n"
+        "    matching_resolution: (cols, rows) resolution for stereo matching\n"
+        "    rgb_to_stitch_resolution: (cols, rows) resolution for RGB stitching\n"
+        "    panorama_resolution: (cols, rows) output panorama resolution\n"
+        "    sigma_i: Edge preservation parameter for ISB filtering\n"
+        "    sigma_s: Smoothing parameter for ISB filtering\n"
+        "    device: CUDA device for processing")
+        .def("estimate_RGBD_panorama", &my_stereo_pkg::RGBDEstimator::run,
+            py::arg("images_to_match"),
+            py::arg("images_to_stitch"),
+            "Estimate RGB-D panorama from fisheye images (matches Python estimate_RGBD_panorama)\n\n"
+            "Args:\n"
+            "    images_to_match: List of [H, W, 3] float32 images for stereo matching\n"
+            "    images_to_stitch: List of [H, W, 3] float32 images for RGB stitching\n\n"
+            "Returns:\n"
+            "    Tuple of (RGB panorama [H, W, 3] uint8, distance panorama [H, W] float32)");
     
     // Temporarily comment out CUDA wrapper functions until signatures are fixed
     /*

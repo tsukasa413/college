@@ -29,7 +29,7 @@ Please refer to license.txt for more details.
 =======================================================================
 **/
 
-#include "vec_utils.cuh"
+#include "my_stereo_pkg/vec_utils.cuh"
 
 #ifndef PI
 #define PI 3.14159265f

@@ -227,6 +227,44 @@ void launch_guide_upsample_2x(
     float weight_up
 );
 
+// Cost Volume Computation CUDA kernel wrappers
+
+/**
+ * Compute cost volume from sweeping volume and reference image
+ * @param sweeping_volume Sweeping volume [1, 3, candidate_count, H, W] RGB values from matched cameras
+ * @param reference_image Reference image [1, 3, 1, H, W] RGB values
+ * @param cost_volume Output cost volume [candidate_count, H, W] float32
+ * @param candidate_count Number of distance candidates
+ * @param rows Image height
+ * @param cols Image width
+ */
+void launch_compute_cost_volume(
+    const at::Tensor& sweeping_volume,
+    const at::Tensor& reference_image,
+    const at::Tensor& cost_volume,
+    int candidate_count,
+    int rows,
+    int cols
+);
+
+/**
+ * Apply quadratic fitting to cost volume for sub-pixel depth accuracy
+ * @param cost_volume Input cost volume [candidate_count, H, W] float32
+ * @param distance_candidates Pre-computed distance values [candidate_count]
+ * @param distance_map Output distance map [H, W] float32
+ * @param candidate_count Number of distance candidates
+ * @param rows Image height
+ * @param cols Image width
+ */
+void launch_quadratic_fitting(
+    const at::Tensor& cost_volume,
+    const at::Tensor& distance_candidates,
+    const at::Tensor& distance_map,
+    int candidate_count,
+    int rows,
+    int cols
+);
+
 // Constants (should match stitcher.cu defines)
 constexpr float MIN_DIST = 0.1f;
 constexpr float MAX_DIST = 100.0f;
