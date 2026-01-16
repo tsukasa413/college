@@ -14,9 +14,14 @@ Proc. IEEE Computer Vision and Pattern Recognition (CVPR 2021, Oral)
 #include "my_stereo_pkg/calibration.hpp"
 #include "my_stereo_pkg/stitcher.hpp"
 #include "my_stereo_pkg/isb_filter.hpp"
+#include "my_stereo_pkg/cuda_kernels.hpp"
 #include <torch/torch.h>
 #include <vector>
 #include <memory>
+
+// Forward declarations for CUDA structures
+struct DoubleSphereParams;
+struct CameraExtrinsics;
 
 namespace my_stereo_pkg {
 
@@ -62,6 +67,11 @@ public:
         float sigma_s,
         const at::Device& device
     );
+
+    /**
+     * Destructor - Free unified memory buffers
+     */
+    ~RGBDEstimator();
 
     /**
      * Execute complete RGBD estimation pipeline
@@ -126,6 +136,38 @@ private:
     std::unique_ptr<ISBFilter> cost_filter_;      // Filter for cost volumes
     std::unique_ptr<ISBFilter> distance_filter_;  // Filter for distance maps
     std::unique_ptr<Stitcher> fisheye_stitcher_;  // Stitcher for panorama creation
+
+    // CUDA structures for fused kernel
+    std::vector<DoubleSphereParams> camera_params_;  // Camera intrinsics for all cameras
+    std::vector<CameraExtrinsics> camera_rts_;       // Relative RT matrices for all cameras
+
+    // Unified Memory Buffers (Zero-Copy Architecture)
+    float* unified_sweeping_volume_ptr_;  // [1, 3, D, H, W]
+    float* unified_cost_volume_ptr_;      // [D, H, W]
+    float* unified_distance_map_ptr_;     // [H, W]
+    float* unified_input_buffer_ptr_;     // [num_cameras, H, W, 3]
+    
+    // Wrapped tensors from unified memory
+    at::Tensor unified_sweeping_volume_;
+    at::Tensor unified_cost_volume_;
+    at::Tensor unified_distance_map_;
+    at::Tensor unified_input_buffer_;
+    
+    // Buffer sizes
+    size_t sweeping_volume_size_;
+    size_t cost_volume_size_;
+    size_t distance_map_size_;
+    size_t input_buffer_size_;
+
+    /**
+     * Allocate unified memory buffers
+     */
+    void allocate_unified_buffers();
+
+    /**
+     * Free unified memory buffers
+     */
+    void free_unified_buffers();
 
     /**
      * Unproject pixel coordinates to 3D unit vectors

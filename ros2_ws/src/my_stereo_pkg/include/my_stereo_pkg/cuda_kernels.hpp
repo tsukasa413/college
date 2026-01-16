@@ -32,6 +32,33 @@ struct CamParams
     float3 translation;
 };
 
+// ============================================================================
+// Fused Depth Estimation Structures
+// ============================================================================
+
+/**
+ * Double Sphere Camera Model Parameters
+ * Reference: https://arxiv.org/abs/1807.08957
+ */
+struct DoubleSphereParams {
+    float fx, fy;           // Focal lengths
+    float cx, cy;           // Principal point
+    float xi;               // First sphere projection parameter
+    float alpha;            // Second sphere projection parameter
+    float scale_x, scale_y; // Matching scale factors
+};
+
+/**
+ * Camera Extrinsics (RT matrix in row-major order)
+ * Stored as float[12] for efficient memory access
+ * Layout: [R00, R01, R02, T0,
+ *          R10, R11, R12, T1,
+ *          R20, R21, R22, T2]
+ */
+struct CameraExtrinsics {
+    float rt[12];  // 3x4 matrix in row-major
+};
+
 // CUDAカーネルのラッパー関数宣言
 
 /**
@@ -230,37 +257,43 @@ void launch_guide_upsample_2x(
 // Cost Volume Computation CUDA kernel wrappers
 
 /**
- * Compute cost volume from sweeping volume and reference image
- * @param sweeping_volume Sweeping volume [1, 3, candidate_count, H, W] RGB values from matched cameras
- * @param reference_image Reference image [1, 3, 1, H, W] RGB values
- * @param cost_volume Output cost volume [candidate_count, H, W] float32
- * @param candidate_count Number of distance candidates
+ * Stage 1: Compute raw cost volume with texture acceleration
+ * @param images All fisheye images [num_cameras][H, W, 3] float32
+ * @param reference_image Reference image [H, W, 3] float32
+ * @param selected_camera_map Camera selection map [H, W] int32
+ * @param distance_candidates Distance values [candidate_count] float32
+ * @param camera_params Camera intrinsics [num_cameras]
+ * @param camera_rts Relative RT matrices [num_cameras]
+ * @param cost_volume_out Output cost volume [D, H, W] float32
+ * @param ref_camera_idx Reference camera index
  * @param rows Image height
  * @param cols Image width
  */
-void launch_compute_cost_volume(
-    const at::Tensor& sweeping_volume,
+void launch_compute_costs(
+    const std::vector<at::Tensor>& images,
     const at::Tensor& reference_image,
-    const at::Tensor& cost_volume,
-    int candidate_count,
+    const at::Tensor& selected_camera_map,
+    const at::Tensor& distance_candidates,
+    const std::vector<DoubleSphereParams>& camera_params,
+    const std::vector<CameraExtrinsics>& camera_rts,
+    const at::Tensor& cost_volume_out,
+    int ref_camera_idx,
     int rows,
     int cols
 );
 
 /**
- * Apply quadratic fitting to cost volume for sub-pixel depth accuracy
- * @param cost_volume Input cost volume [candidate_count, H, W] float32
- * @param distance_candidates Pre-computed distance values [candidate_count]
- * @param distance_map Output distance map [H, W] float32
- * @param candidate_count Number of distance candidates
+ * Stage 3: Compute final depth from ISB-filtered cost volume
+ * @param cost_volume Filtered cost volume [D, H, W] float32
+ * @param distance_candidates Distance values [candidate_count] float32
+ * @param distance_map_out Output distance map [H, W] float32
  * @param rows Image height
  * @param cols Image width
  */
-void launch_quadratic_fitting(
+void launch_final_depth(
     const at::Tensor& cost_volume,
     const at::Tensor& distance_candidates,
-    const at::Tensor& distance_map,
-    int candidate_count,
+    const at::Tensor& distance_map_out,
     int rows,
     int cols
 );

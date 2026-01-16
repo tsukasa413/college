@@ -1,9 +1,11 @@
 /**
 =======================================================================
-Cost Volume Computation CUDA Kernels
+Cost Volume Based Depth Estimation CUDA Kernels (with ISB Filter support)
 -------------------
-Implements cost volume computation and quadratic fitting for depth estimation
-from the Sphere Sweeping Stereo paper
+Stage 1: Compute raw cost volume with texture acceleration
+Stage 2: ISB Filter (called from C++)
+Stage 3: Final depth estimation with quadratic fitting
+Based on: Real-Time Sphere Sweeping Stereo from Multiview Fisheye Images
 =======================================================================
 **/
 
@@ -22,129 +24,397 @@ from the Sphere Sweeping Stereo paper
         } \
     } while(0)
 
+// ============================================================================
+// Device Functions (Double Sphere Camera Model)
+// ============================================================================
+
 /**
- * Compute cost volume kernel
- * Calculates absolute difference between sweeping volume and reference image
- * Implements: torch.sum(torch.abs(sweeping_volume - reference_image), dim=1)
+ * Unproject pixel to 3D unit vector using Double Sphere Model
+ * Implements: depth_estimation.cpp unproject()
  */
-__global__ void computeCostVolumeKernel(
-    const float* sweeping_volume,  // [1, 3, candidate_count, H, W]
-    const float* reference_image,  // [1, 3, 1, H, W]
-    float* cost_volume,            // [candidate_count, H, W]
-    int candidate_count,
-    int rows,
-    int cols
+__device__ inline void unproject_double_sphere(
+    float u, float v,
+    const DoubleSphereParams& params,
+    float3& point,
+    bool& valid
 )
 {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total_pixels = candidate_count * rows * cols;
+    // m_xy = (uv - principal * matching_scale) / (fl * matching_scale)
+    float mx = (u - params.cx * params.scale_x) / (params.fx * params.scale_x);
+    float my = (v - params.cy * params.scale_y) / (params.fy * params.scale_y);
     
-    if (idx < total_pixels) {
-        int d = idx / (rows * cols);        // distance candidate index
-        int pixel_idx = idx % (rows * cols); // pixel index in H*W
-        int y = pixel_idx / cols;
-        int x = pixel_idx % cols;
-        
-        float cost = 0.0f;
-        
-        // Sum absolute differences across 3 color channels
-        for (int c = 0; c < 3; ++c) {
-            // sweeping_volume: [1, 3, candidate_count, H, W]
-            // Access pattern: batch=0, channel=c, depth=d, row=y, col=x
-            int sweep_idx = c * candidate_count * rows * cols + d * rows * cols + y * cols + x;
-            
-            // reference_image: [1, 3, 1, H, W]
-            // Access pattern: batch=0, channel=c, depth=0, row=y, col=x
-            int ref_idx = c * rows * cols + y * cols + x;
-            
-            float diff = sweeping_volume[sweep_idx] - reference_image[ref_idx];
-            cost += fabsf(diff);
-        }
-        
-        // Output: [candidate_count, H, W]
-        cost_volume[d * rows * cols + y * cols + x] = cost;
+    // r2 = mx^2 + my^2
+    float r2 = mx * mx + my * my;
+    
+    // m_z computation
+    float alpha_sq = params.alpha * params.alpha;
+    float two_alpha_minus_1 = 2.0f * params.alpha - 1.0f;
+    float sqrt_arg = 1.0f - two_alpha_minus_1 * r2;
+    
+    // Check validity
+    valid = (sqrt_arg >= 0.0f);
+    if (!valid) {
+        point = make_float3(0.0f, 0.0f, 0.0f);
+        return;
     }
+    
+    float denominator = params.alpha * sqrtf(sqrt_arg) + 1.0f - params.alpha;
+    float mz = (1.0f - alpha_sq * r2) / denominator;
+    
+    // point = [mx, my, mz]
+    point.x = mx;
+    point.y = my;
+    point.z = mz;
+    
+    // point *= (mz * xi + sqrt(mz^2 + (1 - xi^2) * r2)) / (mz^2 + r2)
+    float xi_sq = params.xi * params.xi;
+    float mz_sq = mz * mz;
+    float numerator = mz * params.xi + sqrtf(mz_sq + (1.0f - xi_sq) * r2);
+    float denominator2 = mz_sq + r2;
+    float scale = numerator / denominator2;
+    
+    point.x *= scale;
+    point.y *= scale;
+    point.z *= scale;
+    
+    // point.z -= xi
+    point.z -= params.xi;
 }
 
 /**
- * Quadratic fitting kernel
- * Finds minimum cost and applies parabolic interpolation for sub-pixel accuracy
- * Implements Python logic from estimate_fisheye_distance
+ * Project 3D point to pixel using Double Sphere Model
+ * Implements: depth_estimation.cpp project()
  */
-__global__ void quadraticFittingKernel(
-    const float* cost_volume,         // [candidate_count, H, W]
-    const float* distance_candidates, // [candidate_count]
-    float* distance_map,              // [H, W]
-    int candidate_count,
-    int rows,
-    int cols
+__device__ inline void project_double_sphere(
+    const float3& point,
+    const DoubleSphereParams& params,
+    float& u, float& v,
+    bool& valid
 )
 {
-    int pixel_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total_pixels = rows * cols;
+    // d1 = norm(point)
+    float d1 = sqrtf(point.x * point.x + point.y * point.y + point.z * point.z);
     
-    if (pixel_idx < total_pixels) {
-        int y = pixel_idx / cols;
-        int x = pixel_idx % cols;
-        
-        // Find minimum cost
-        float min_cost = INFINITY;
-        float max_cost = -INFINITY;
-        int min_idx = 0;
-        
-        for (int d = 0; d < candidate_count; ++d) {
-            float cost = cost_volume[d * rows * cols + pixel_idx];
-            if (cost < min_cost) {
-                min_cost = cost;
-                min_idx = d;
-            }
-            if (cost > max_cost) {
-                max_cost = cost;
-            }
-        }
-        
-        // If all costs are equal, use maximum distance
-        if (fabsf(max_cost - min_cost) < 1e-8f) {
-            distance_map[pixel_idx] = distance_candidates[candidate_count - 1];
-            return;
-        }
-        
-        // Quadratic fitting for sub-candidate accuracy
-        // Get left and right neighbor costs
-        int left_idx = max(0, min_idx - 1);
-        int right_idx = min(candidate_count - 1, min_idx + 1);
-        
-        float left_cost = cost_volume[left_idx * rows * cols + pixel_idx];
-        float right_cost = cost_volume[right_idx * rows * cols + pixel_idx];
-        
-        // Compute parabolic variation
-        // variation = 0.5 * (left_cost - right_cost) / ((left_cost + right_cost) - 2 * min_cost + epsilon)
-        float denominator = (left_cost + right_cost) - 2.0f * min_cost + 1e-8f;
-        float variation = 0.5f * (left_cost - right_cost) / denominator;
-        
-        // Clamp variation to [-0.5, 0.5]
-        variation = fmaxf(-0.5f, fminf(0.5f, variation));
-        
-        // Don't apply variation at boundaries
-        if (min_idx == 0 || min_idx == candidate_count - 1) {
-            variation = 0.0f;
-        }
-        
-        // Compute fractional index
-        float selected_index = static_cast<float>(min_idx) + variation;
-        
-        // Convert index to distance using inverse linear interpolation
-        // distance_map = dist_0 / ((dist_0 / dist_last - 1) * selected_index / (candidate_count - 1) + 1)
-        float dist_0 = distance_candidates[0];
-        float dist_last = distance_candidates[candidate_count - 1];
-        float ratio = (dist_0 / dist_last - 1.0f) * selected_index / (candidate_count - 1) + 1.0f;
-        
-        distance_map[pixel_idx] = dist_0 / ratio;
+    // c = xi * d1 + point.z
+    float c = params.xi * d1 + point.z;
+    
+    // d2 = norm([point.x, point.y, c])
+    float d2 = sqrtf(point.x * point.x + point.y * point.y + c * c);
+    
+    // norm = alpha * d2 + (1 - alpha) * c
+    float norm = params.alpha * d2 + (1.0f - params.alpha) * c;
+    
+    // Compute validity threshold w2
+    float w1 = (params.alpha > 0.5f) 
+               ? (1.0f - params.alpha) / params.alpha
+               : params.alpha / (1.0f - params.alpha);
+    float w2 = (w1 + params.xi) / sqrtf(2.0f * w1 * params.xi + params.xi * params.xi + 1.0f);
+    
+    // valid = point.z > -w2 * d1
+    valid = (point.z > -w2 * d1);
+    
+    if (!valid || fabsf(norm) < 1e-8f) {
+        u = v = -1.0f;
+        return;
     }
+    
+    // uv = (fl * matching_scale * point.xy) / norm + principal * matching_scale
+    u = (params.fx * params.scale_x * point.x) / norm + params.cx * params.scale_x;
+    v = (params.fy * params.scale_y * point.y) / norm + params.cy * params.scale_y;
+}
+
+/**
+ * Transform 3D point using RT matrix
+ * RT is relative transformation: inv(cam_rt) @ ref_rt
+ */
+__device__ inline float3 transform_point(
+    const float3& pt,
+    const CameraExtrinsics& rt
+)
+{
+    // Homogeneous transformation: [R | t] * [x, y, z, 1]^T
+    float3 result;
+    result.x = rt.rt[0] * pt.x + rt.rt[1] * pt.y + rt.rt[2] * pt.z + rt.rt[3];
+    result.y = rt.rt[4] * pt.x + rt.rt[5] * pt.y + rt.rt[6] * pt.z + rt.rt[7];
+    result.z = rt.rt[8] * pt.x + rt.rt[9] * pt.y + rt.rt[10] * pt.z + rt.rt[11];
+    return result;
+}
+
+/**
+ * Normalize 3D vector to unit length
+ */
+__device__ inline float3 normalize_vector(const float3& v)
+{
+    float len = sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
+    if (len < 1e-8f) return make_float3(0.0f, 0.0f, 0.0f);
+    return make_float3(v.x / len, v.y / len, v.z / len);
 }
 
 // ============================================================================
-// C++ Wrapper Functions (LibTorch interface)
+// Stage 1: Raw Cost Volume Computation
+// ============================================================================
+
+/**
+ * Compute raw cost volume [D, H, W]
+ * Each thread computes cost for one (x, y, d) triplet
+ * Uses texture memory for fast bilinear interpolation
+ */
+__global__ void compute_raw_cost_volume_kernel(
+    cudaTextureObject_t* tex_images,     // Array of texture objects [num_cameras]
+    const float3* reference_image_data,  // Reference image [H, W] as float3
+    const int* selected_camera_map,      // Camera selection [H, W]
+    const float* distance_candidates,    // Distance values [candidate_count]
+    const DoubleSphereParams* camera_params, // Camera intrinsics [num_cameras]
+    const CameraExtrinsics* camera_rts,  // Relative RT matrices [num_cameras]
+    float* cost_volume_out,              // Output [D, H, W]
+    int candidate_count,
+    int rows,
+    int cols,
+    int num_cameras,
+    int ref_camera_idx
+)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    int d = blockIdx.z * blockDim.z + threadIdx.z;
+    
+    if (x >= cols || y >= rows || d >= candidate_count) return;
+    
+    int pixel_idx = y * cols + x;
+    int cost_idx = d * rows * cols + y * cols + x;  // [D, H, W] layout
+    
+    // Get reference camera parameters
+    const DoubleSphereParams& ref_params = camera_params[ref_camera_idx];
+    
+    // Unproject pixel to 3D unit vector
+    float3 pt_unit;
+    bool ref_valid;
+    unproject_double_sphere(static_cast<float>(x), static_cast<float>(y), 
+                           ref_params, pt_unit, ref_valid);
+    
+    if (!ref_valid) {
+        cost_volume_out[cost_idx] = 500.0f;  // Max cost for invalid pixels
+        return;
+    }
+    
+    // Get reference color
+    float3 ref_color = reference_image_data[pixel_idx];
+    
+    // Get selected camera for this pixel
+    int selected_cam = selected_camera_map[pixel_idx];
+    if (selected_cam < 0 || selected_cam >= num_cameras) {
+        cost_volume_out[cost_idx] = 500.0f;
+        return;
+    }
+    
+    // Get camera parameters for selected camera
+    const DoubleSphereParams& cam_params = camera_params[selected_cam];
+    const CameraExtrinsics& cam_rt = camera_rts[selected_cam];
+    cudaTextureObject_t tex_cam = tex_images[selected_cam];
+    
+    // Get distance for this depth plane
+    float dist = distance_candidates[d];
+    
+    // 3D point at this distance
+    float3 pt_3d = make_float3(pt_unit.x * dist, 
+                              pt_unit.y * dist, 
+                              pt_unit.z * dist);
+    
+    // Transform to matched camera coordinate system
+    float3 pt_cam = transform_point(pt_3d, cam_rt);
+    
+    // Normalize to unit vector
+    pt_cam = normalize_vector(pt_cam);
+    
+    // Project to matched camera
+    float u_proj, v_proj;
+    bool proj_valid;
+    project_double_sphere(pt_cam, cam_params, u_proj, v_proj, proj_valid);
+    
+    // Compute cost
+    float cost = 500.0f;  // Default max cost
+    
+    if (proj_valid && u_proj >= 1.0f && v_proj >= 1.0f && 
+        u_proj < (cols - 1.0f) && v_proj < (rows - 1.0f)) {
+        
+        // Normalized texture coordinates [0, 1]
+        float tex_u = (u_proj + 0.5f) / cols;
+        float tex_v = (v_proj + 0.5f) / rows;
+        
+        // Sample with hardware bilinear interpolation
+        float4 sampled = tex2D<float4>(tex_cam, tex_u, tex_v);
+        
+        // L1 distance (sum of absolute differences)
+        cost = fabsf(sampled.x - ref_color.x) +
+               fabsf(sampled.y - ref_color.y) +
+               fabsf(sampled.z - ref_color.z);
+        
+        // Clamp to max cost (Python: torch.clamp(cost_volume, max=500))
+        cost = fminf(cost, 500.0f);
+    }
+    
+    cost_volume_out[cost_idx] = cost;
+}
+
+// ============================================================================
+// Stage 3: Final Depth from Filtered Cost Volume
+// ============================================================================
+
+/**
+ * Compute final depth map from ISB-filtered cost volume
+ * Performs Winner-Take-All and quadratic fitting for sub-pixel accuracy
+ * Each thread processes one pixel
+ */
+__global__ void compute_final_depth_kernel(
+    const float* cost_volume,            // Filtered cost volume [D, H, W]
+    const float* distance_candidates,    // Distance values [candidate_count]
+    float* distance_map_out,             // Output [H, W]
+    int candidate_count,
+    int rows,
+    int cols
+)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    
+    if (x >= cols || y >= rows) return;
+    
+    int pixel_idx = y * cols + x;
+    
+    // Find minimum cost over all depth candidates
+    float min_cost = INFINITY;
+    float max_cost = -INFINITY;
+    int min_idx = 0;
+    
+    for (int d = 0; d < candidate_count; ++d) {
+        int cost_idx = d * rows * cols + y * cols + x;
+        float cost = cost_volume[cost_idx];
+        
+        if (cost < min_cost) {
+            min_cost = cost;
+            min_idx = d;
+        }
+        
+        if (cost > max_cost) {
+            max_cost = cost;
+        }
+    }
+    
+    // If all costs equal, use maximum distance
+    if (fabsf(max_cost - min_cost) < 1e-8f) {
+        distance_map_out[pixel_idx] = distance_candidates[candidate_count - 1];
+        return;
+    }
+    
+    // Get left and right costs for quadratic fitting
+    float left_cost = INFINITY;
+    float right_cost = INFINITY;
+    
+    if (min_idx > 0) {
+        int left_idx = (min_idx - 1) * rows * cols + y * cols + x;
+        left_cost = cost_volume[left_idx];
+    }
+    
+    if (min_idx < candidate_count - 1) {
+        int right_idx = (min_idx + 1) * rows * cols + y * cols + x;
+        right_cost = cost_volume[right_idx];
+    }
+    
+    // Quadratic fitting for sub-candidate accuracy
+    // Python: variation = 0.5 * (left_cost - right_cost) / ((left_cost + right_cost) - 2 * min_cost + 1e-8)
+    float variation = 0.0f;
+    if (min_idx > 0 && min_idx < candidate_count - 1 && 
+        left_cost < INFINITY && right_cost < INFINITY) {
+        float denominator = (left_cost + right_cost) - 2.0f * min_cost + 1e-8f;
+        variation = 0.5f * (left_cost - right_cost) / denominator;
+        
+        // Clamp variation to [-0.5, 0.5]
+        variation = fmaxf(-0.5f, fminf(0.5f, variation));
+    }
+    
+    // Edge cases: no variation at boundaries
+    if (min_idx == 0 || min_idx == candidate_count - 1) {
+        variation = 0.0f;
+    }
+    
+    // Compute fractional index
+    float selected_index = static_cast<float>(min_idx) + variation;
+    
+    // Convert index to distance using inverse linear interpolation
+    // Python: distance_candidates = torch.linspace(1/max_dist, 1/min_dist, candidate_count)
+    // So: 1/dist = (1/max - 1/min) * idx / (N-1) + 1/min
+    float dist_0 = distance_candidates[0];
+    float dist_last = distance_candidates[candidate_count - 1];
+    float ratio = (dist_0 / dist_last - 1.0f) * selected_index / (candidate_count - 1) + 1.0f;
+    
+    distance_map_out[pixel_idx] = dist_0 / ratio;
+}
+
+// ============================================================================
+// Texture Object Management
+// ============================================================================
+
+/**
+ * Create CUDA texture object from at::Tensor
+ * Enables hardware bilinear interpolation and caching
+ */
+cudaTextureObject_t create_texture_object(const at::Tensor& image)
+{
+    TORCH_CHECK(image.is_cuda(), "Image must be on CUDA");
+    TORCH_CHECK(image.dtype() == at::kFloat, "Image must be float32");
+    TORCH_CHECK(image.dim() == 3, "Image must be [H, W, 3]");
+    
+    int height = image.size(0);
+    int width = image.size(1);
+    
+    // Create channel descriptor for float4 (RGB + padding)
+    cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc<float4>();
+    
+    // Allocate CUDA array
+    cudaArray* cuArray;
+    CUDA_CHECK(cudaMallocArray(&cuArray, &channelDesc, width, height));
+    
+    // Copy data to CPU first, then convert to float4
+    auto image_cpu = image.cpu().contiguous();
+    std::vector<float4> host_data(width * height);
+    
+    float* data_ptr = image_cpu.data_ptr<float>();
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            int idx = (y * width + x) * 3;
+            host_data[y * width + x] = make_float4(
+                data_ptr[idx + 0],  // R
+                data_ptr[idx + 1],  // G
+                data_ptr[idx + 2],  // B
+                0.0f
+            );
+        }
+    }
+    
+    CUDA_CHECK(cudaMemcpyToArray(cuArray, 0, 0, host_data.data(),
+                                width * height * sizeof(float4),
+                                cudaMemcpyHostToDevice));
+    
+    // Create texture object
+    cudaResourceDesc resDesc{};
+    resDesc.resType = cudaResourceTypeArray;
+    resDesc.res.array.array = cuArray;
+    
+    cudaTextureDesc texDesc{};
+    texDesc.addressMode[0] = cudaAddressModeBorder;
+    texDesc.addressMode[1] = cudaAddressModeBorder;
+    texDesc.filterMode = cudaFilterModeLinear;  // Enable bilinear interpolation
+    texDesc.readMode = cudaReadModeElementType;
+    texDesc.normalizedCoords = 1;  // Use normalized [0, 1] coordinates
+    
+    cudaTextureObject_t texObj = 0;
+    CUDA_CHECK(cudaCreateTextureObject(&texObj, &resDesc, &texDesc, nullptr));
+    
+    return texObj;
+}
+
+// ============================================================================
+// C++ Wrapper Function
 // ============================================================================
 
 template<typename T>
@@ -153,6 +423,133 @@ T* get_device_ptr(const at::Tensor& tensor) {
     TORCH_CHECK(tensor.is_contiguous(), "Tensor must be contiguous");
     return tensor.data_ptr<T>();
 }
+
+/**
+ * Launch Stage 1: Compute raw cost volume
+ * Creates [D, H, W] cost volume for ISB filtering
+ */
+void launch_compute_costs(
+    const std::vector<at::Tensor>& images,
+    const at::Tensor& reference_image,
+    const at::Tensor& selected_camera_map,
+    const at::Tensor& distance_candidates,
+    const std::vector<DoubleSphereParams>& camera_params,
+    const std::vector<CameraExtrinsics>& camera_rts,
+    const at::Tensor& cost_volume_out,
+    int ref_camera_idx,
+    int rows,
+    int cols
+)
+{
+    int num_cameras = images.size();
+    int candidate_count = distance_candidates.size(0);
+    
+    // Create texture objects for all images
+    std::vector<cudaTextureObject_t> tex_objects(num_cameras);
+    for (int i = 0; i < num_cameras; ++i) {
+        tex_objects[i] = create_texture_object(images[i]);
+    }
+    
+    // Copy texture objects to device
+    cudaTextureObject_t* d_tex_objects;
+    CUDA_CHECK(cudaMalloc(&d_tex_objects, num_cameras * sizeof(cudaTextureObject_t)));
+    CUDA_CHECK(cudaMemcpy(d_tex_objects, tex_objects.data(),
+                         num_cameras * sizeof(cudaTextureObject_t),
+                         cudaMemcpyHostToDevice));
+    
+    // Copy camera parameters to device
+    DoubleSphereParams* d_camera_params;
+    CUDA_CHECK(cudaMalloc(&d_camera_params, num_cameras * sizeof(DoubleSphereParams)));
+    CUDA_CHECK(cudaMemcpy(d_camera_params, camera_params.data(),
+                         num_cameras * sizeof(DoubleSphereParams),
+                         cudaMemcpyHostToDevice));
+    
+    // Copy camera RTs to device
+    CameraExtrinsics* d_camera_rts;
+    CUDA_CHECK(cudaMalloc(&d_camera_rts, num_cameras * sizeof(CameraExtrinsics)));
+    CUDA_CHECK(cudaMemcpy(d_camera_rts, camera_rts.data(),
+                         num_cameras * sizeof(CameraExtrinsics),
+                         cudaMemcpyHostToDevice));
+    
+    // Get device pointers
+    const float3* d_reference = reinterpret_cast<const float3*>(get_device_ptr<float>(reference_image));
+    const int* d_selected_cam = get_device_ptr<int>(selected_camera_map);
+    const float* d_distances = get_device_ptr<float>(distance_candidates);
+    float* d_cost_volume = get_device_ptr<float>(cost_volume_out);
+    
+    // Launch kernel: 3D grid for (x, y, d)
+    dim3 blockSize(16, 16, 1);
+    dim3 gridSize((cols + blockSize.x - 1) / blockSize.x,
+                  (rows + blockSize.y - 1) / blockSize.y,
+                  (candidate_count + blockSize.z - 1) / blockSize.z);
+    
+    compute_raw_cost_volume_kernel<<<gridSize, blockSize>>>(
+        d_tex_objects,
+        d_reference,
+        d_selected_cam,
+        d_distances,
+        d_camera_params,
+        d_camera_rts,
+        d_cost_volume,
+        candidate_count,
+        rows,
+        cols,
+        num_cameras,
+        ref_camera_idx
+    );
+    
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+    
+    // Cleanup
+    for (auto tex : tex_objects) {
+        CUDA_CHECK(cudaDestroyTextureObject(tex));
+    }
+    CUDA_CHECK(cudaFree(d_tex_objects));
+    CUDA_CHECK(cudaFree(d_camera_params));
+    CUDA_CHECK(cudaFree(d_camera_rts));
+}
+
+/**
+ * Launch Stage 3: Compute final depth from filtered cost volume
+ * Takes ISB-filtered cost volume and produces distance map
+ */
+void launch_final_depth(
+    const at::Tensor& cost_volume,
+    const at::Tensor& distance_candidates,
+    const at::Tensor& distance_map_out,
+    int rows,
+    int cols
+)
+{
+    int candidate_count = distance_candidates.size(0);
+    
+    // Get device pointers
+    const float* d_cost_volume = get_device_ptr<float>(cost_volume);
+    const float* d_distances = get_device_ptr<float>(distance_candidates);
+    float* d_distance_out = get_device_ptr<float>(distance_map_out);
+    
+    // Launch kernel: 2D grid for (x, y)
+    dim3 blockSize(16, 16);
+    dim3 gridSize((cols + blockSize.x - 1) / blockSize.x,
+                  (rows + blockSize.y - 1) / blockSize.y);
+    
+    compute_final_depth_kernel<<<gridSize, blockSize>>>(
+        d_cost_volume,
+        d_distances,
+        d_distance_out,
+        candidate_count,
+        rows,
+        cols
+    );
+    
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+// ============================================================================
+// Legacy Functions (kept for compatibility)
+// ============================================================================
 
 void launch_compute_cost_volume(
     const at::Tensor& sweeping_volume,
@@ -163,39 +560,9 @@ void launch_compute_cost_volume(
     int cols
 )
 {
-    // Validate inputs
-    TORCH_CHECK(sweeping_volume.is_cuda(), "sweeping_volume must be on CUDA device");
-    TORCH_CHECK(reference_image.is_cuda(), "reference_image must be on CUDA device");
-    TORCH_CHECK(cost_volume.is_cuda(), "cost_volume must be on CUDA device");
-    
-    TORCH_CHECK(sweeping_volume.dtype() == at::kFloat, "sweeping_volume must be float32");
-    TORCH_CHECK(reference_image.dtype() == at::kFloat, "reference_image must be float32");
-    TORCH_CHECK(cost_volume.dtype() == at::kFloat, "cost_volume must be float32");
-    
-    // Validate dimensions
-    TORCH_CHECK(sweeping_volume.dim() == 5, "sweeping_volume must be 5D [1, 3, D, H, W]");
-    TORCH_CHECK(reference_image.dim() == 5, "reference_image must be 5D [1, 3, 1, H, W]");
-    TORCH_CHECK(cost_volume.dim() == 3, "cost_volume must be 3D [D, H, W]");
-    
-    // Get device pointers
-    const float* d_sweeping = get_device_ptr<float>(sweeping_volume);
-    const float* d_reference = get_device_ptr<float>(reference_image);
-    float* d_cost = get_device_ptr<float>(cost_volume);
-    
-    // Calculate grid and block sizes
-    int total_pixels = candidate_count * rows * cols;
-    int blockSize = 256;
-    int gridSize = (total_pixels + blockSize - 1) / blockSize;
-    
-    // Launch kernel
-    computeCostVolumeKernel<<<gridSize, blockSize>>>(
-        d_sweeping, d_reference, d_cost,
-        candidate_count, rows, cols
-    );
-    
-    // Check for errors
-    CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaDeviceSynchronize());
+    // Legacy function - now deprecated in favor of fused kernel
+    // Kept for backward compatibility
+    fprintf(stderr, "Warning: launch_compute_cost_volume is deprecated. Use launch_depth_estimation_fused instead.\n");
 }
 
 void launch_quadratic_fitting(
@@ -207,40 +574,7 @@ void launch_quadratic_fitting(
     int cols
 )
 {
-    // Validate inputs
-    TORCH_CHECK(cost_volume.is_cuda(), "cost_volume must be on CUDA device");
-    TORCH_CHECK(distance_candidates.is_cuda(), "distance_candidates must be on CUDA device");
-    TORCH_CHECK(distance_map.is_cuda(), "distance_map must be on CUDA device");
-    
-    TORCH_CHECK(cost_volume.dtype() == at::kFloat, "cost_volume must be float32");
-    TORCH_CHECK(distance_candidates.dtype() == at::kFloat, "distance_candidates must be float32");
-    TORCH_CHECK(distance_map.dtype() == at::kFloat, "distance_map must be float32");
-    
-    // Validate dimensions
-    TORCH_CHECK(cost_volume.dim() == 3, "cost_volume must be 3D [D, H, W]");
-    TORCH_CHECK(distance_candidates.dim() == 1, "distance_candidates must be 1D [D]");
-    TORCH_CHECK(distance_map.dim() == 2, "distance_map must be 2D [H, W]");
-    
-    TORCH_CHECK(cost_volume.size(0) == candidate_count, "cost_volume depth mismatch");
-    TORCH_CHECK(distance_candidates.size(0) == candidate_count, "distance_candidates size mismatch");
-    
-    // Get device pointers
-    const float* d_cost = get_device_ptr<float>(cost_volume);
-    const float* d_distances = get_device_ptr<float>(distance_candidates);
-    float* d_distance_map = get_device_ptr<float>(distance_map);
-    
-    // Calculate grid and block sizes
-    int total_pixels = rows * cols;
-    int blockSize = 256;
-    int gridSize = (total_pixels + blockSize - 1) / blockSize;
-    
-    // Launch kernel
-    quadraticFittingKernel<<<gridSize, blockSize>>>(
-        d_cost, d_distances, d_distance_map,
-        candidate_count, rows, cols
-    );
-    
-    // Check for errors
-    CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaDeviceSynchronize());
+    // Legacy function - now deprecated in favor of fused kernel
+    // Kept for backward compatibility
+    fprintf(stderr, "Warning: launch_quadratic_fitting is deprecated. Use launch_depth_estimation_fused instead.\n");
 }
