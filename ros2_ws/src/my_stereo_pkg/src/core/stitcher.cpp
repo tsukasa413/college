@@ -222,10 +222,10 @@ Intrinsics Stitcher::vectorize_calibration(const Calibration& calib) {
      */
     Intrinsics intrinsics;
     
-    intrinsics.fl.x = calib.fl.x * calib.matching_scale;
-    intrinsics.fl.y = calib.fl.y * calib.matching_scale;
-    intrinsics.principal.x = calib.principal.x * calib.matching_scale;
-    intrinsics.principal.y = calib.principal.y * calib.matching_scale;
+    intrinsics.fl.x = calib.fl.x * calib.matching_scale.x;
+    intrinsics.fl.y = calib.fl.y * calib.matching_scale.y;
+    intrinsics.principal.x = calib.principal.x * calib.matching_scale.x;
+    intrinsics.principal.y = calib.principal.y * calib.matching_scale.y;
     intrinsics.xi = calib.xi;
     intrinsics.alpha = calib.alpha;
     

@@ -44,5 +44,3 @@ Thumbs.db
 # 秘密鍵や環境変数ファイル（間違って上げないように）
 *.pem
 .env
-
-sphere-stereo/.venv/
