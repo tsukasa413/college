@@ -5,16 +5,11 @@ ros2_ws/log/
 *.bag
 my_slam_dataset/
 
-basalt/cmake-build*
-basalt/.idea
-basalt/CMakeLists.txt.user
-basalt/build*
-basalt/scripts/eval/eval_*
-basalt/scripts/eval_full/eval_*
-basalt/stats_*.*json
-basalt/__pycache__*.bag
+basalt/
 
 sphere-stereo/.venv
+
+Pangolin/
 
 *.pptx
 *.zip
