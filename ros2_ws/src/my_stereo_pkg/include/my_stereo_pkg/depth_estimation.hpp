@@ -152,11 +152,6 @@ private:
     std::vector<at::Tensor> per_camera_guide_buffers_;  // [num_refs][H, W, 3] uint8
     at::Tensor temp_distance_buffer_;  // [H, W] float32 for final depth kernel output
     
-    // Asynchronous Pipeline: CUDA Streams for Zero-Wait Parallelization
-    std::vector<cudaStream_t> camera_streams_;  // One stream per reference camera
-    cudaStream_t stitching_stream_;            // Dedicated stream for stitching
-    std::vector<cudaEvent_t> camera_events_;   // Events for cross-stream synchronization
-    
     // Wrapped tensors from unified memory
     at::Tensor unified_sweeping_volume_;
     at::Tensor unified_cost_volume_;

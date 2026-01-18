@@ -283,6 +283,23 @@ void launch_compute_costs(
 );
 
 /**
+ * ASYNC version with CUDA stream support
+ */
+void launch_compute_costs_async(
+    const std::vector<at::Tensor>& images,
+    const at::Tensor& reference_image,
+    const at::Tensor& selected_camera_map,
+    const at::Tensor& distance_candidates,
+    const std::vector<DoubleSphereParams>& camera_params,
+    const std::vector<CameraExtrinsics>& camera_rts,
+    const at::Tensor& cost_volume_out,
+    int ref_camera_idx,
+    int rows,
+    int cols,
+    cudaStream_t stream
+);
+
+/**
  * Stage 3: Compute final depth from ISB-filtered cost volume
  * @param cost_volume Filtered cost volume [D, H, W] float32
  * @param distance_candidates Distance values [candidate_count] float32
