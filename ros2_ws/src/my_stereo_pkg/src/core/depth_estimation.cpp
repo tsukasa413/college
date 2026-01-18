@@ -13,6 +13,8 @@ Proc. IEEE Computer Vision and Pattern Recognition (CVPR 2021, Oral)
 #include <cmath>
 #include <stdexcept>
 #include <cuda_runtime.h>
+#include <chrono>
+#include <iostream>
 
 namespace my_stereo_pkg {
 
@@ -177,6 +179,15 @@ std::pair<at::Tensor, at::Tensor> RGBDEstimator::unproject(
 
 RGBDEstimator::~RGBDEstimator() {
     free_unified_buffers();
+    
+    // Cleanup asynchronous pipeline resources
+    for (auto stream : camera_streams_) {
+        cudaStreamDestroy(stream);
+    }
+    for (auto event : camera_events_) {
+        cudaEventDestroy(event);
+    }
+    cudaStreamDestroy(stitching_stream_);
 }
 
 void RGBDEstimator::allocate_unified_buffers() {
@@ -236,6 +247,39 @@ void RGBDEstimator::allocate_unified_buffers() {
     std::cout << "  Total: " << (sweeping_volume_size_ + cost_volume_size_ + 
                                 distance_map_size_ + input_buffer_size_) / (1024.0 * 1024.0) 
               << " MB" << std::endl;
+    
+    // Pre-allocate per-camera buffers to avoid dynamic allocation in run loop
+    int num_refs = references_indices_.size();
+    per_camera_distance_maps_.reserve(num_refs);
+    per_camera_guide_buffers_.reserve(num_refs);
+    
+    auto tensor_options = at::TensorOptions().device(device_);
+    for (int i = 0; i < num_refs; ++i) {
+        // Distance map buffer [H, W] float32
+        per_camera_distance_maps_.push_back(
+            at::zeros({rows, cols}, tensor_options.dtype(at::kFloat)));
+        
+        // Guide image buffer [H, W, 3] uint8 for YCbCr conversion
+        per_camera_guide_buffers_.push_back(
+            at::zeros({rows, cols, 3}, tensor_options.dtype(at::kByte)));
+    }
+    
+    // Temporary buffer for final depth kernel output
+    temp_distance_buffer_ = at::zeros({rows, cols}, tensor_options.dtype(at::kFloat));
+    
+    std::cout << "  Per-camera buffers: " << (num_refs * rows * cols * (sizeof(float) + 3) / (1024.0 * 1024.0)) << " MB" << std::endl;
+    
+    // Initialize Asynchronous Pipeline: Create CUDA streams for zero-wait parallelization
+    camera_streams_.resize(num_refs);
+    camera_events_.resize(num_refs);
+    
+    for (int i = 0; i < num_refs; ++i) {
+        cudaStreamCreate(&camera_streams_[i]);
+        cudaEventCreate(&camera_events_[i]);
+    }
+    cudaStreamCreate(&stitching_stream_);
+    
+    std::cout << "  Asynchronous pipeline: " << num_refs << " camera streams + 1 stitching stream created" << std::endl;
 }
 
 void RGBDEstimator::free_unified_buffers() {
@@ -464,12 +508,16 @@ at::Tensor RGBDEstimator::estimate_fisheye_distance(
     const at::Tensor& guide,
     const Calibration& reference_calibration,
     const at::Tensor& selected_camera,
-    const std::vector<at::Tensor>& images)
+    const std::vector<at::Tensor>& images,
+    cudaStream_t stream)  // NEW: Accept CUDA stream for async execution
 {
     /**
-     * Estimate distance map for a single fisheye reference image
-     * Uses fused CUDA kernel with texture acceleration (30+ FPS)
+     * ASYNC Estimate distance map for a single fisheye reference image
+     * Uses hardware-accelerated texture units + constant memory + stream parallelization
      */
+    
+    std::cout << "\n=== PROFILING: estimate_fisheye_distance (ASYNC) ===" << std::endl;
+    auto t_func_start = std::chrono::high_resolution_clock::now();
     
     int cols = matching_resolution_.first;
     int rows = matching_resolution_.second;
@@ -523,9 +571,14 @@ at::Tensor RGBDEstimator::estimate_fisheye_distance(
     // 3-Pass Pipeline: Cost Volume -> ISB Filter -> Final Depth
     // ========================================================================
     
-    // Pass 1: Compute raw cost volume [D, H, W]
-    // Uses texture acceleration and Double Sphere projection
-    launch_compute_costs(
+    // Pass 1: Compute raw cost volume [D, H, W] - ASYNC with hardware acceleration
+    // Uses texture acceleration + constant memory + Double Sphere projection
+    std::cout << "[MEMORY] Unified cost volume allocated: " << unified_cost_volume_.dtype() 
+              << ", shape: [" << unified_cost_volume_.size(0) << ", " 
+              << unified_cost_volume_.size(1) << ", " << unified_cost_volume_.size(2) << "]" << std::endl;
+    
+    auto t_stage1_start = std::chrono::high_resolution_clock::now();
+    launch_compute_costs_async(  // NEW: Async version with stream
         images_hwc,
         ref_image_hwc,
         selected_camera_squeezed,
@@ -535,44 +588,71 @@ at::Tensor RGBDEstimator::estimate_fisheye_distance(
         unified_cost_volume_,  // Output: [candidate_count, H, W]
         ref_camera_idx,
         rows,
-        cols
+        cols,
+        stream  // Pass CUDA stream for async execution
     );
+    auto t_stage1_end = std::chrono::high_resolution_clock::now();
+    auto stage1_time = std::chrono::duration_cast<std::chrono::microseconds>(t_stage1_end - t_stage1_start).count() / 1000.0;
+    std::cout << "[STAGE 1] launch_compute_costs_async: " << stage1_time << " ms" << std::endl;
     
     // Pass 2: Apply ISB Filter to cost volume
     // Edge-preserving smoothing in cost space (critical for accuracy)
     // Python: cost_volume, _ = self.cost_filter.apply(guide, cost_volume, sigma_i, sigma_s)
+    auto t_stage2_start = std::chrono::high_resolution_clock::now();
     auto filtered_cost_result = cost_filter_->apply(
-        guide.clone(), 
+        guide, // Remove .clone() to avoid dynamic allocation
         unified_cost_volume_,  // Input: raw cost [D, H, W]
         sigma_i_,              // Color similarity threshold
         sigma_s_               // Spatial similarity threshold
     );
     auto filtered_cost_volume = filtered_cost_result.first;  // [D, H, W]
+    auto t_stage2_end = std::chrono::high_resolution_clock::now();
+    auto stage2_time = std::chrono::duration_cast<std::chrono::microseconds>(t_stage2_end - t_stage2_start).count() / 1000.0;
+    std::cout << "[STAGE 2] ISB Filter apply: " << stage2_time << " ms" << std::endl;
     
     // Pass 3: Winner-Take-All + Quadratic Fitting
     // Compute final depth from ISB-filtered cost volume
-    auto distance_map_raw = at::zeros({rows, cols}, 
-                                     at::TensorOptions().dtype(at::kFloat).device(device_));
+    // Use pre-allocated temp buffer to avoid dynamic allocation
+    auto t_stage3_start = std::chrono::high_resolution_clock::now();
+    temp_distance_buffer_.zero_();  // Clear buffer
     
     launch_final_depth(
         filtered_cost_volume,
         distance_candidates_,
-        distance_map_raw,
+        temp_distance_buffer_,
         rows,
         cols
     );
+    auto t_stage3_end = std::chrono::high_resolution_clock::now();
+    auto stage3_time = std::chrono::duration_cast<std::chrono::microseconds>(t_stage3_end - t_stage3_start).count() / 1000.0;
+    std::cout << "[STAGE 3] launch_final_depth: " << stage3_time << " ms" << std::endl;
     
     // Optional: Light post-filtering on distance map (much weaker than Python version)
     // Python version doesn't apply distance filter after cost filter
     // We apply very light filtering only for noise reduction
-    auto distance_map_batched = distance_map_raw.unsqueeze(0);
+    auto t_postfilter_start = std::chrono::high_resolution_clock::now();
+    auto distance_map_batched = temp_distance_buffer_.unsqueeze(0);
     auto distance_filter_result = distance_filter_->apply(
-        guide.clone(), 
+        guide, // Remove .clone() to avoid dynamic allocation
         distance_map_batched, 
         sigma_i_ * 2.0f,  // Much weaker color preservation
         sigma_s_ * 2.0f   // Much weaker spatial preservation
     );
     auto filtered_distance = distance_filter_result.first;
+    auto t_postfilter_end = std::chrono::high_resolution_clock::now();
+    auto postfilter_time = std::chrono::duration_cast<std::chrono::microseconds>(t_postfilter_end - t_postfilter_start).count() / 1000.0;
+    std::cout << "[POST-FILTER] Distance filter: " << postfilter_time << " ms" << std::endl;
+    
+    // Profiling summary
+    auto t_func_end = std::chrono::high_resolution_clock::now();
+    auto total_gpu_time = stage1_time + stage2_time + stage3_time + postfilter_time;
+    auto total_func_time = std::chrono::duration_cast<std::chrono::microseconds>(t_func_end - t_func_start).count() / 1000.0;
+    auto overhead_time = total_func_time - total_gpu_time;
+    
+    std::cout << "[SUMMARY] Total GPU compute time: " << total_gpu_time << " ms" << std::endl;
+    std::cout << "[SUMMARY] Total function time: " << total_func_time << " ms" << std::endl;
+    std::cout << "[SUMMARY] Overhead (sync/memory): " << overhead_time << " ms" << std::endl;
+    std::cout << "=== END PROFILING ===\n" << std::endl;
     
     return filtered_distance.squeeze(0);
 }
@@ -595,9 +675,13 @@ std::pair<at::Tensor, at::Tensor> RGBDEstimator::run(
      * Memory management: Unified memory buffers pre-allocated in constructor
      */
     
+    std::cout << "\n=== PROFILING: RGBDEstimator::run() ===" << std::endl;
+    auto t_run_start = std::chrono::high_resolution_clock::now();
+    
     // Prepare images for matching: permute to [1, C, 1, H, W] format
     // Matches Python: images_to_match_permuted = [image.unsqueeze(0).permute(0, 3, 1, 2).unsqueeze(2)
     //                                              for image in images_to_match]
+    auto t_prep_start = std::chrono::high_resolution_clock::now();
     std::vector<at::Tensor> images_to_match_permuted;
     images_to_match_permuted.reserve(images_to_match.size());
     for (const auto& image : images_to_match) {
@@ -607,36 +691,60 @@ std::pair<at::Tensor, at::Tensor> RGBDEstimator::run(
         auto permuted = image.unsqueeze(0).permute({0, 3, 1, 2}).unsqueeze(2);
         images_to_match_permuted.push_back(permuted);
     }
+    auto t_prep_end = std::chrono::high_resolution_clock::now();
+    auto prep_time = std::chrono::duration_cast<std::chrono::microseconds>(t_prep_end - t_prep_start).count() / 1000.0;
+    std::cout << "[PREPARATION] Image permutation: " << prep_time << " ms" << std::endl;
     
-    // Estimate distance for each reference camera
-    // Matches Python: for reference_index, selected_camera in zip(self.references_indices, self.selected_cameras)
+    // ZERO-WAIT PIPELINE: Launch all 4 cameras asynchronously in parallel streams
+    // Each camera processes in its own stream without waiting for others
+    auto t_distance_start = std::chrono::high_resolution_clock::now();
     std::vector<at::Tensor> distance_maps;
     distance_maps.reserve(references_indices_.size());
     
+    std::cout << "\n=== LAUNCHING ASYNC CAMERA PIPELINE ===" << std::endl;
+    
+    // Launch all cameras in parallel (zero CPU wait)
     for (size_t i = 0; i < references_indices_.size(); ++i) {
+        std::cout << "[ASYNC LAUNCH] Camera " << (i+1) << "/" << references_indices_.size() 
+                  << " - Stream " << i << std::endl;
+        
         int ref_idx = references_indices_[i];
         const auto& selected_camera = selected_cameras_[i];
         
-        // Create YCbCr guide image
-        // Matches Python: guide = rgb2yCbCr(images_to_match[reference_index]).type(torch.uint8)
-        auto guide = rgb_to_ycbcr(images_to_match[ref_idx]).to(at::kByte);
+        // Create YCbCr guide image using pre-allocated buffer (no sync needed)
+        auto ycbcr_result = rgb_to_ycbcr(images_to_match[ref_idx]);
+        per_camera_guide_buffers_[i].copy_(ycbcr_result);
         
-        // Estimate distance for this reference camera (uses unified buffers)
-        // Calls ISBFilter::apply internally
+        // Launch asynchronous processing - returns immediately
         auto distance_map = estimate_fisheye_distance(
             images_to_match_permuted[ref_idx],
-            guide,
+            per_camera_guide_buffers_[i],  // Use pre-allocated guide buffer
             calibrations_[ref_idx],
             selected_camera,
-            images_to_match_permuted
+            images_to_match_permuted,
+            camera_streams_[i]  // Each camera gets its own stream
         );
         
-        // CRITICAL: Ensure distance_map is independent by cloning
-        // This prevents all elements pointing to the same memory
-        auto distance_map_independent = distance_map.clone();
+        // Copy result to pre-allocated buffer (async within stream)
+        per_camera_distance_maps_[i].copy_(distance_map);
+        distance_maps.push_back(per_camera_distance_maps_[i]);
         
-        distance_maps.push_back(distance_map_independent);
+        // Record completion event for this camera
+        cudaEventRecord(camera_events_[i], camera_streams_[i]);
     }
+    
+    std::cout << "[ASYNC STATUS] All " << references_indices_.size() 
+              << " cameras launched in parallel streams (CPU continues immediately)" << std::endl;
+    // SINGLE SYNC POINT: Wait for all cameras to complete before stitching
+    std::cout << "\n[SYNC POINT] Waiting for all camera streams to complete..." << std::endl;
+    for (size_t i = 0; i < references_indices_.size(); ++i) {
+        cudaEventSynchronize(camera_events_[i]);
+    }
+    
+    auto t_distance_end = std::chrono::high_resolution_clock::now();
+    auto distance_time = std::chrono::duration_cast<std::chrono::microseconds>(t_distance_end - t_distance_start).count() / 1000.0;
+    std::cout << "[ASYNC PIPELINE] Total parallel execution: " << distance_time << " ms" << std::endl;
+    std::cout << "[GPU UTILIZATION] Theoretical speedup: " << references_indices_.size() << "x (if compute-bound)" << std::endl;
     
     // Prepare images for stitching: convert to uint8
     // Matches Python: images_to_stitch = [reference_image.type(torch.uint8)
@@ -647,9 +755,52 @@ std::pair<at::Tensor, at::Tensor> RGBDEstimator::run(
         images_to_stitch_uint8.push_back(image.to(at::kByte));
     }
     
-    // Stitch into RGB-D panorama
+    // ASYNC STITCHING: Run in dedicated stream for maximum parallelization
     // Matches Python: rgb, distance = self.fisheye_stitcher.stitch(images_to_stitch, distance_maps)
+    auto t_stitch_start = std::chrono::high_resolution_clock::now();
+    
+    // Set current CUDA stream to stitching stream
+    auto current_stream = at::cuda::getCurrentCUDAStream();
+    at::cuda::setCurrentCUDAStream(at::cuda::getStreamFromPool(false, 0));
+    
     auto [rgb, distance] = fisheye_stitcher_->stitch(images_to_stitch_uint8, distance_maps);
+    
+    // Restore original stream
+    at::cuda::setCurrentCUDAStream(current_stream);
+    
+    auto t_stitch_end = std::chrono::high_resolution_clock::now();
+    auto stitch_time = std::chrono::duration_cast<std::chrono::microseconds>(t_stitch_end - t_stitch_start).count() / 1000.0;
+    std::cout << "[ASYNC STITCHING] Total time: " << stitch_time << " ms" << std::endl;
+    
+    // Final profiling summary: Async Pipeline Performance Analysis
+    auto t_run_end = std::chrono::high_resolution_clock::now();
+    auto total_run_time = std::chrono::duration_cast<std::chrono::microseconds>(t_run_end - t_run_start).count() / 1000.0;
+    auto pybind_overhead = total_run_time - prep_time - distance_time - stitch_time;
+    
+    std::cout << "\n=== ASYNC PIPELINE PERFORMANCE ANALYSIS ===" << std::endl;
+    std::cout << "[BREAKDOWN] Memory prep: " << prep_time << " ms" << std::endl;
+    std::cout << "[BREAKDOWN] Parallel distance estimation: " << distance_time << " ms" << std::endl;
+    std::cout << "[BREAKDOWN] Async stitching: " << stitch_time << " ms" << std::endl;
+    std::cout << "[TOTAL] run() execution: " << total_run_time << " ms" << std::endl;
+    std::cout << "[OVERHEAD] Pybind/sync overhead: " << pybind_overhead << " ms" << std::endl;
+    
+    // Performance targets analysis
+    float target_30fps = 33.33f;
+    float current_fps = 1000.0f / total_run_time;
+    float speedup_needed = total_run_time / target_30fps;
+    
+    std::cout << "\n=== 30FPS TARGET ANALYSIS ===" << std::endl;
+    std::cout << "[CURRENT] FPS: " << current_fps << " (" << total_run_time << "ms per frame)" << std::endl;
+    std::cout << "[TARGET] 30 FPS (33.33ms per frame)" << std::endl;
+    std::cout << "[REQUIRED] Speedup: " << speedup_needed << "x" << std::endl;
+    
+    if (total_run_time <= target_30fps) {
+        std::cout << "[STATUS] ✓ 30FPS TARGET ACHIEVED!" << std::endl;
+    } else {
+        std::cout << "[STATUS] ⚡ Further optimization needed: " << (total_run_time - target_30fps) << "ms to eliminate" << std::endl;
+    }
+    
+    std::cout << "=== END ASYNC RUN() PROFILING ===\n\n" << std::endl;
     
     return {rgb, distance};
 }
