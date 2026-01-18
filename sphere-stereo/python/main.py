@@ -54,9 +54,9 @@ if __name__ == "__main__":
     parser.add_argument('--rgb_to_stitch_resolution', nargs=2, type=int, default=[1216, 1216])
     parser.add_argument('--panorama_resolution', nargs=2, type=int, default=[2048, 1024])
     parser.add_argument('--device', type=str, default="cuda:0")
-    parser.add_argument('--saving', type=bool, default=True)
-    parser.add_argument('--visualize', type=bool, default=False)
-    parser.add_argument('--evaluate', type=bool, default=False)
+    parser.add_argument('--saving', type=lambda x: x.lower() == 'true', default=True)
+    parser.add_argument('--visualize', type=lambda x: x.lower() == 'true', default=False)
+    parser.add_argument('--evaluate', type=lambda x: x.lower() == 'true', default=False)
     parser.add_argument('--bad_px_ratio_thresholds', type=float, default=[0.1, 0.4])
     args = parser.parse_args()
 

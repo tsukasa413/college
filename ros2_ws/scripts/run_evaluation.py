@@ -286,16 +286,16 @@ def main():
     print("--------------------------------------------------")
     if python_time_ms > 0.0:
         speedup = python_time_ms / cpp_time_ms if cpp_time_ms > 0 else 0
-        print(f"  Python Execution Time:  {python_time_ms:7.1f} ms  (total process time)")
-        print(f"  C++ Execution Time:     {cpp_time_ms:7.1f} ms  (total process time)")
+        print(f"  Python Execution Time:  {python_time_ms:8.1f} ms  ({python_time_ms/1000:.2f} s)")
+        print(f"  C++ Execution Time:     {cpp_time_ms:8.1f} ms  ({cpp_time_ms/1000:.2f} s)")
         if metrics.get('cpp_gpu_time'):
-            print(f"  C++ GPU Kernel Time:    {metrics['cpp_gpu_time']:7.1f} ms  (pure GPU computation)")
+            print(f"  C++ GPU Kernel Time:    {metrics['cpp_gpu_time']:8.1f} ms  ({metrics['cpp_gpu_time']/1000:.2f} s)")
         print()
-        print(f"  Speedup:                {speedup:7.1f} x  (C++ is {speedup:.1f} times faster)")
+        print(f"  Speedup:                   {speedup:5.1f} x  (C++ is {speedup:.1f} times faster)")
     else:
-        print(f"  C++ Execution Time:     {cpp_time_ms:7.1f} ms  (total process time)")
+        print(f"  C++ Execution Time:     {cpp_time_ms:8.1f} ms  ({cpp_time_ms/1000:.2f} s)")
         if metrics.get('cpp_gpu_time'):
-            print(f"  C++ GPU Kernel Time:    {metrics['cpp_gpu_time']:7.1f} ms  (pure GPU computation)")
+            print(f"  C++ GPU Kernel Time:    {metrics['cpp_gpu_time']:8.1f} ms  ({metrics['cpp_gpu_time']/1000:.2f} s)")
         print("  Python time: Not measured (--skip_python was used)")
     print()
     
