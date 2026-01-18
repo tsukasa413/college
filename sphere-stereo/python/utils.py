@@ -279,7 +279,10 @@ def save_rgbd_panorama(rgbd_panoramas, filename, dataset_path):
         rgbd_panorama = rgbd_panoramas[filename]
         save_name = os.path.splitext(filename)[0]
         cv2.imwrite(os.path.join(dataset_path, "output/rgb_" + save_name + ".png"), rgbd_panorama["rgb"])
-        cv2.imwrite(os.path.join(dataset_path, "output/inv_distance_" + save_name + ".tif"), 
-                    rgbd_panorama["inv_distance"])
+        
+        # Normalize inverse distance to 0-255 for PNG visualization
+        inv_dist = rgbd_panorama["inv_distance"]
+        inv_dist_normalized = ((inv_dist - inv_dist.min()) / (inv_dist.max() - inv_dist.min()) * 255).astype(np.uint8)
+        cv2.imwrite(os.path.join(dataset_path, "output/inv_distance_" + save_name + ".png"), inv_dist_normalized)
     except KeyError:
         pass
