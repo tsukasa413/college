@@ -31,6 +31,18 @@ find_package(ament_cmake_python REQUIRED)
 # find_package(sensor_msgs REQUIRED)
 # find_package(cv_bridge REQUIRED)  # Temporarily disabled due to OpenCV issues
 
+# Find OpenCV (required for main_eval)
+# Manually find OpenCV libraries - use the actual .so files in aarch64-linux-gnu
+set(OpenCV_INCLUDE_DIRS "/usr/include/opencv4")
+set(OpenCV_LIBS 
+  /usr/lib/aarch64-linux-gnu/libopencv_core.so.4.5d
+  /usr/lib/aarch64-linux-gnu/libopencv_imgcodecs.so.4.5d
+  /usr/lib/aarch64-linux-gnu/libopencv_imgproc.so.4.5d
+)
+
+message(STATUS "Using OpenCV from: ${OpenCV_INCLUDE_DIRS}")
+message(STATUS "OpenCV libraries: ${OpenCV_LIBS}")
+
 # Find PyTorch 
 set(CMAKE_PREFIX_PATH "/home/motoken/.local/lib/python3.10/site-packages/torch/share/cmake/Torch;${CMAKE_PREFIX_PATH}")
 find_package(Torch REQUIRED)
@@ -64,6 +76,8 @@ include_directories(
   ${Python3_INCLUDE_DIRS}
   ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
 )
+
+# OpenCV include directories need to be added separately for main_eval target
 
 # Create CUDA kernels library
 add_library(cuda_kernels_lib STATIC
@@ -164,7 +178,45 @@ install(TARGETS _core_cpp
   DESTINATION "${PYTHON_INSTALL_DIR}/${PROJECT_NAME}"
 )
 
+# ========================================================================
+# Build main_eval executable for C++/Python validation
+# ========================================================================
+
+add_executable(main_eval
+  src/main_eval.cpp
+)
+
+set_target_properties(main_eval PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED ON
+)
+
+target_compile_options(main_eval PRIVATE
+  ${TORCH_CXX_FLAGS}
+)
+
+# Add OpenCV include directories to main_eval
+target_include_directories(main_eval PRIVATE
+  ${OpenCV_INCLUDE_DIRS}
+)
+
+target_link_libraries(main_eval PRIVATE
+  stitcher_lib
+  cuda_kernels_lib
+  ${TORCH_LIBRARIES}
+  ${OpenCV_LIBS}
+  stdc++fs  # For std::filesystem support
+)
+
+# Install main_eval executable
+install(TARGETS main_eval
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+# ========================================================================
 # Install Python scripts
+# ========================================================================
+
 install(PROGRAMS
   scripts/debug_main.py
   DESTINATION lib/${PROJECT_NAME}

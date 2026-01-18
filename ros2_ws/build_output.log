@@ -1,32 +1,39 @@
 Starting >>> my_stereo_pkg
 --- stderr: my_stereo_pkg
-CMake Warning at CMakeLists.txt:41 (message):
-  CUDA not found.  Building without CUDA support.
+CMake Deprecation Warning at CMakeLists.txt:1 (cmake_minimum_required):
+  Compatibility with CMake < 3.10 will be removed from a future version of
+  CMake.
+
+  Update the VERSION argument <min> value.  Or, use the <min>...<max> syntax
+  to tell CMake that the project requires at least <min> but has been updated
+  to work with policies introduced by <max> or earlier.
 
 
-CMake Warning at CMakeLists.txt:45 (find_package):
-  By not providing "FindTorch.cmake" in CMAKE_MODULE_PATH this project has
-  asked CMake to find a package configuration file provided by "Torch", but
-  CMake did not find one.
+CMake Error at /usr/lib/cmake/opencv4/OpenCVModules.cmake:172 (message):
+  The imported target "opencv_core" references the file
 
-  Could not find a package configuration file provided by "Torch" with any of
-  the following names:
+     "/usr/lib/libopencv_core.so.4.8.0"
 
-    TorchConfig.cmake
-    torch-config.cmake
+  but this file does not exist.  Possible reasons include:
 
-  Add the installation prefix of "Torch" to CMAKE_PREFIX_PATH or set
-  "Torch_DIR" to a directory containing one of the above files.  If "Torch"
-  provides a separate development package or SDK, be sure it has been
-  installed.
+  * The file was deleted, renamed, or moved to another location.
 
+  * An install or uninstall procedure did not complete successfully.
 
-CMake Warning at CMakeLists.txt:51 (message):
-  LibTorch not found.  Building without PyTorch support.
+  * The installation package was faulty and contained
+
+     "/usr/lib/cmake/opencv4/OpenCVModules.cmake"
+
+  but not all the files it references.
+
+Call Stack (most recent call first):
+  /usr/lib/cmake/opencv4/OpenCVConfig.cmake:126 (include)
+  CMakeLists.txt:35 (find_package)
 
 
 ---
-Finished <<< my_stereo_pkg [7.91s]
+Failed   <<< my_stereo_pkg [0.24s, exited with code 1]
 
-Summary: 1 package finished [8.15s]
+Summary: 0 packages finished [0.75s]
+  1 package failed: my_stereo_pkg
   1 package had stderr output: my_stereo_pkg
