@@ -215,12 +215,10 @@ install(TARGETS main_eval
 
 # ========================================================================
 # Install Python scripts
-# ========================================================================
-
-install(PROGRAMS
-  scripts/debug_main.py
-  DESTINATION lib/${PROJECT_NAME}
-)
+# install(PROGRAMS
+#   scripts/debug_main.py
+#   DESTINATION lib/${PROJECT_NAME}
+# )
 
 # Install launch files (if any)
 # install(DIRECTORY
