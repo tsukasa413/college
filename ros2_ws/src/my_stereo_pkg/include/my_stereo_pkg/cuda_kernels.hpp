@@ -224,7 +224,8 @@ void launch_guide_upsample_2x(
     int colsOut,
     int candidate_count,
     float var_inv_i,
-    float weight_up
+    float weight_up,
+    float weight_down
 );
 
 // Constants (should match stitcher.cu defines)
