@@ -26,7 +26,7 @@ find_package(Eigen3 REQUIRED)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 # ============================================================================
-# Sphere Stereo GPU Kernels
+# Sphere Stereo GPU Kernels (Utils)
 # ============================================================================
 
 add_library(cuda_utils_kernels STATIC
@@ -52,11 +52,38 @@ target_compile_options(cuda_utils_kernels PRIVATE
 )
 
 # ============================================================================
-# Sphere Stereo Host Utilities
+# Sphere Stereo Depth Estimation Kernels (Fused)
+# ============================================================================
+
+add_library(cuda_depth_estimation_kernels STATIC
+    src/cuda/depth_estimation.cu
+)
+
+set_target_properties(cuda_depth_estimation_kernels PROPERTIES
+    CUDA_ARCHITECTURES 87
+    CUDA_SEPARABLE_COMPILATION ON
+    POSITION_INDEPENDENT_CODE ON
+    CUDA_STANDARD 17
+)
+
+target_include_directories(cuda_depth_estimation_kernels PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${EIGEN3_INCLUDE_DIR}
+)
+
+target_compile_options(cuda_depth_estimation_kernels PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:-maxrregcount=64>
+    $<$<COMPILE_LANGUAGE:CUDA>:-O3>
+    $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math>
+)
+
+# ============================================================================
+# Sphere Stereo Host Utilities & Depth Estimation
 # ============================================================================
 
 add_library(sphere_stereo_utils SHARED
     src/core/utils.cpp
+    src/core/depth_estimation.cpp
 )
 
 set_target_properties(sphere_stereo_utils PROPERTIES
@@ -72,7 +99,7 @@ target_include_directories(sphere_stereo_utils PUBLIC
 
 target_link_libraries(sphere_stereo_utils
     PUBLIC
-        -Wl,--whole-archive cuda_utils_kernels -Wl,--no-whole-archive
+        -Wl,--whole-archive cuda_utils_kernels cuda_depth_estimation_kernels -Wl,--no-whole-archive
         ${CUDA_LIBRARIES}
         ${CUDA_CUDART_LIBRARY}
         Eigen3::Eigen
@@ -99,6 +126,30 @@ install(
 
 # ============================================================================
 # Test Executable
+# ============================================================================
+
+# ============================================================================
+# Test: Depth Estimation
+# ============================================================================
+
+add_executable(test_depth_estimation
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../scripts/test_depth_estimation.cpp
+)
+
+target_include_directories(test_depth_estimation PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_link_libraries(test_depth_estimation PRIVATE
+    sphere_stereo_utils
+)
+
+install(TARGETS test_depth_estimation
+    RUNTIME DESTINATION lib/${PROJECT_NAME}
+)
+
+# ============================================================================
+# Test: GPU Kernel (existing)
 # ============================================================================
 
 add_executable(test_gpu_kernel
