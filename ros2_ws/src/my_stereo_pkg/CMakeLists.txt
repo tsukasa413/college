@@ -1,194 +1,139 @@
-cmake_minimum_required(VERSION 3.8)
-project(my_stereo_pkg)
+cmake_minimum_required(VERSION 3.16)
+project(my_stereo_pkg LANGUAGES CXX CUDA)
 
-# Enable CUDA support
-enable_language(CUDA)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CUDA_STANDARD 17)
 
-# Default to C++17
-if(NOT CMAKE_CXX_STANDARD)
-  set(CMAKE_CXX_STANDARD 17)
+# Jetson AGX Orin optimizations
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
+  message(STATUS "Building for ARM64 (Jetson AGX Orin)")
+  add_compile_options(-O3 -march=armv8-a+crc+crypto -mtune=cortex-a78)
 endif()
 
-if(NOT CMAKE_CUDA_STANDARD)
-  set(CMAKE_CUDA_STANDARD 17)
-endif()
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -ffast-math")
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3 --use_fast_math")
+set(CMAKE_CUDA_ARCHITECTURES 87)
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
-# Jetson AGX Orin specific optimizations
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
-  message(STATUS "Building for ARM64 architecture (Jetson AGX Orin)")
-  add_compile_options(-march=armv8-a+crc+crypto -mtune=cortex-a78)
-  add_compile_options(-O3 -DNDEBUG)
-endif()
+# Find required packages
+find_package(CUDA REQUIRED)
+find_package(Eigen3 REQUIRED)
 
-# Find dependencies
-find_package(ament_cmake REQUIRED)
-find_package(ament_cmake_python REQUIRED)
-# find_package(rclcpp REQUIRED)
-# find_package(sensor_msgs REQUIRED)
-# find_package(cv_bridge REQUIRED)  # Temporarily disabled due to OpenCV issues
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 
-# Find PyTorch 
-set(CMAKE_PREFIX_PATH "/home/motoken/.local/lib/python3.10/site-packages/torch/share/cmake/Torch;${CMAKE_PREFIX_PATH}")
-find_package(Torch REQUIRED)
-# Don't apply TORCH_CXX_FLAGS globally, only to specific targets
-# set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
+# ============================================================================
+# Sphere Stereo GPU Kernels
+# ============================================================================
 
-# Find PyTorch Python library for Python bindings
-execute_process(
-  COMMAND ${Python3_EXECUTABLE} -c "import torch; import os; print(os.path.join(os.path.dirname(torch.__file__), 'lib', 'libtorch_python.so'))"
-  OUTPUT_VARIABLE TORCH_PYTHON_LIBRARY
-  OUTPUT_STRIP_TRAILING_WHITESPACE
-)
-message(STATUS "PyTorch Python library: ${TORCH_PYTHON_LIBRARY}")
-
-# Find CUDA
-find_package(CUDAToolkit REQUIRED)
-
-# Find pybind11
-find_package(pybind11 REQUIRED)
-
-# Find Python
-find_package(Python3 REQUIRED COMPONENTS Interpreter Development)
-
-# Set CUDA architecture for Jetson AGX Orin (Ampere architecture)
-set(CMAKE_CUDA_ARCHITECTURES 87)
-
-# Include directories
-include_directories(
-  include/
-  ${TORCH_INCLUDE_DIRS}
-  ${Python3_INCLUDE_DIRS}
-  ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
+add_library(cuda_utils_kernels STATIC
+    src/cuda/utils_kernel.cu
 )
 
-# Create CUDA kernels library
-add_library(cuda_kernels_lib STATIC
-  src/cuda/stitcher.cu
-  src/cuda/isb_filter.cu
-  src/cuda_wrapper.cu
+set_target_properties(cuda_utils_kernels PROPERTIES
+    CUDA_ARCHITECTURES 87
+    CUDA_SEPARABLE_COMPILATION ON
+    POSITION_INDEPENDENT_CODE ON
+    CUDA_STANDARD 17
 )
 
-# Set properties for CUDA library
-set_target_properties(cuda_kernels_lib PROPERTIES
-  CUDA_STANDARD 17
-  CUDA_STANDARD_REQUIRED ON
-  POSITION_INDEPENDENT_CODE ON
-  CUDA_RESOLVE_DEVICE_SYMBOLS ON
-  CUDA_SEPARABLE_COMPILATION ON
+target_include_directories(cuda_utils_kernels PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${EIGEN3_INCLUDE_DIR}
 )
 
-# Set CUDA compilation flags
-target_compile_options(cuda_kernels_lib PRIVATE 
-  $<$<COMPILE_LANGUAGE:CUDA>:-O3>
-  $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math>
-  $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
-  $<$<COMPILE_LANGUAGE:CXX>:${TORCH_CXX_FLAGS}>
+target_compile_options(cuda_utils_kernels PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:-maxrregcount=128>
+    $<$<COMPILE_LANGUAGE:CUDA>:-O3>
+    $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math>
 )
 
-# Prevent C++ defines from leaking to CUDA/ptxas
-set_source_files_properties(
-  src/cuda/stitcher.cu
-  src/cuda/isb_filter.cu
-  src/cuda_wrapper.cu
-  PROPERTIES
-  COMPILE_OPTIONS "-D_GLIBCXX_USE_CXX11_ABI=1"
+# ============================================================================
+# Sphere Stereo Host Utilities
+# ============================================================================
+
+add_library(sphere_stereo_utils SHARED
+    src/core/utils.cpp
 )
 
-# Link CUDA libraries to kernels library
-target_link_libraries(cuda_kernels_lib PUBLIC
-  CUDA::cudart
-  ${TORCH_LIBRARIES}
+set_target_properties(sphere_stereo_utils PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+    CXX_STANDARD 17
 )
 
-# Create Stitcher C++ library
-add_library(stitcher_lib STATIC
-  src/core/stitcher.cpp
-  src/core/isb_filter.cpp
+target_include_directories(sphere_stereo_utils PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CUDA_INCLUDE_DIRS}
+    ${EIGEN3_INCLUDE_DIR}
 )
 
-# Set properties for Stitcher library
-set_target_properties(stitcher_lib PROPERTIES
-  CXX_STANDARD 17
-  CXX_STANDARD_REQUIRED ON
-  POSITION_INDEPENDENT_CODE ON
+target_link_libraries(sphere_stereo_utils
+    PUBLIC
+        -Wl,--whole-archive cuda_utils_kernels -Wl,--no-whole-archive
+        ${CUDA_LIBRARIES}
+        ${CUDA_CUDART_LIBRARY}
+        Eigen3::Eigen
 )
 
-# Apply PyTorch C++ flags to Stitcher library
-target_compile_options(stitcher_lib PRIVATE
-  ${TORCH_CXX_FLAGS}
+target_compile_options(sphere_stereo_utils PRIVATE 
+    -Wall -Wextra -Wno-unused-parameter
 )
 
-# Link Stitcher library with CUDA kernels and PyTorch
-target_link_libraries(stitcher_lib PUBLIC
-  cuda_kernels_lib
-  ${TORCH_LIBRARIES}
+# ============================================================================
+# Installation
+# ============================================================================
+
+install(
+    DIRECTORY include/
+    DESTINATION include
 )
 
-# Create PyTorch extension module (instead of pybind11_add_module)
-add_library(_core_cpp MODULE 
-  src/bindings.cpp
+install(
+    TARGETS sphere_stereo_utils cuda_utils_kernels
+    LIBRARY DESTINATION lib
+    ARCHIVE DESTINATION lib
 )
 
-# Set properties for the PyTorch extension module
-set_target_properties(_core_cpp PROPERTIES
-  CXX_STANDARD 17
-  CXX_STANDARD_REQUIRED ON
-  POSITION_INDEPENDENT_CODE ON
-  PREFIX ""  # Remove lib prefix for Python modules
+# ============================================================================
+# Test Executable
+# ============================================================================
+
+add_executable(test_gpu_kernel
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../scripts/test_gpu_kernel.cpp
 )
 
-# Link PyTorch libraries 
-target_link_libraries(_core_cpp PRIVATE
-  ${TORCH_LIBRARIES}
-  ${TORCH_PYTHON_LIBRARY}
-  pybind11::module
-  cuda_kernels_lib
-  stitcher_lib
+target_include_directories(test_gpu_kernel PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
-# Compiler-specific options
-target_compile_definitions(_core_cpp PRIVATE VERSION_INFO=${EXAMPLE_VERSION_INFO})
-
-# Install Python package
-ament_python_install_package(${PROJECT_NAME})
-
-# Install the pybind11 module
-install(TARGETS _core_cpp
-  DESTINATION "${PYTHON_INSTALL_DIR}/${PROJECT_NAME}"
+target_link_libraries(test_gpu_kernel PRIVATE
+    sphere_stereo_utils
 )
 
-# Install Python scripts
-# install(PROGRAMS
-#   scripts/debug_main.py
-#   DESTINATION lib/${PROJECT_NAME}
-# )
+install(TARGETS test_gpu_kernel
+    RUNTIME DESTINATION lib/${PROJECT_NAME}
+)
 
-# Install launch files (if any)
-# install(DIRECTORY
-#   launch
-#   DESTINATION share/${PROJECT_NAME}/
-# )
+# ============================================================================
+# Additional Test: All Utilities
+# ============================================================================
 
-# Install config files (if any)
-# install(DIRECTORY
-#   config
-#   DESTINATION share/${PROJECT_NAME}/
-# )
+add_executable(test_all_utils
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../scripts/test_all_utils.cpp
+)
 
-if(BUILD_TESTING)
-  find_package(ament_lint_auto REQUIRED)
-  # the following line skips the linter which checks for copyrights
-  # comment the line when a copyright and license is added to all source files
-  set(ament_cmake_copyright_FOUND TRUE)
-  # the following line skips cpplint (only works in a git repo)
-  # comment the line when this package is in a git repo and when
-  # a copyright and license is added to all source files
-  set(ament_cmake_cpplint_FOUND TRUE)
-  ament_lint_auto_find_test_dependencies()
-endif()
+target_include_directories(test_all_utils PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
 
-ament_package()
+target_link_libraries(test_all_utils PRIVATE
+    sphere_stereo_utils
+)
+
+message(STATUS "=== Sphere Stereo Build ===")
+message(STATUS "CUDA: ${CUDA_FOUND}")
+message(STATUS "Eigen3: ${EIGEN3_FOUND}")
+message(STATUS "================================")
