@@ -98,41 +98,46 @@ __device__ inline float2 scale_f2(float2 v, float s) {
  */
 __device__ inline void unproject_double_sphere(
     float2 uv,
-    const CameraCalibration calib,    // ← VALUE PASSING
+    const CameraCalibration calib,
     float3& point_out,
     char& valid_out
 ) {
-    const Intrinsics& intr_ref = calib.intrinsics;
+    // The Double Sphere Camera Model (https://arxiv.org/abs/1807.08957)
+    // Matches Python implementation in utils.py
+    const Intrinsics& intr = calib.intrinsics;
     
-    // Normalized image coordinates
-    float mx = (uv.x - intr_ref.cx) / intr_ref.fx;
-    float my = (uv.y - intr_ref.cy) / intr_ref.fy;
+    // m_xy = (uv - principal) / fl
+    float m_x = (uv.x - intr.cx) / intr.fx;
+    float m_y = (uv.y - intr.cy) / intr.fy;
     
-    // Radius in normalized image space
-    float r2 = mx * mx + my * my;
+    float r2 = m_x * m_x + m_y * m_y;
+    float xi = intr.xi;
+    float alpha = intr.alpha;
     
-    // Double Sphere model inverse (matching CPU reference)
-    float alpha = intr_ref.alpha;
-    float xi = intr_ref.xi;
-    
-    // Validity check
-    float denom = alpha * r2 + 1.0f - (2.0f * alpha - 1.0f) * r2 * xi;
-    if (denom < 0.0001f) {
+    // Check validity: 1 - (2*alpha - 1)*r2 >= 0
+    float discriminant = 1.0f - (2.0f * alpha - 1.0f) * r2;
+    if (discriminant < 0.0f) {
         point_out = make_float3(0, 0, 0);
         valid_out = 0;
         return;
     }
     
-    // Compute z on first sphere
-    float numerator = 1.0f - xi * xi * r2;
-    float z_sphere = numerator / denom;
+    // m_z = (1 - alpha^2 * r2) / (alpha * sqrt(1 - (2*alpha - 1)*r2) + 1 - alpha)
+    float m_z = (1.0f - alpha * alpha * r2) / 
+                (alpha * sqrtf(discriminant) + 1.0f - alpha);
     
-    // 3D point
-    float x_3d = mx * z_sphere;
-    float y_3d = my * z_sphere;
-    float z_3d = z_sphere - xi;
+    // point = [m_xy, m_z]
+    float3 point = make_float3(m_x, m_y, m_z);
     
-    point_out = make_float3(x_3d, y_3d, z_3d);
+    // point = ((m_z * xi + sqrt(m_z^2 + (1 - xi^2) * r2)) / (m_z^2 + r2)) * point
+    float scale = (m_z * xi + sqrtf(m_z * m_z + (1.0f - xi * xi) * r2)) / 
+                  (m_z * m_z + r2);
+    point.x *= scale;
+    point.y *= scale;
+    point.z = point.z * scale - xi;  // point[..., 2] -= xi
+    
+    // Double Sphere formula naturally produces unit vectors (see paper)
+    point_out = make_float3(point.x, point.y, point.z);
     valid_out = 1;
 }
 
@@ -147,40 +152,63 @@ __device__ inline void unproject_double_sphere(
  */
 __device__ inline void project_double_sphere(
     float3 point,
-    const CameraCalibration calib,    // ← VALUE PASSING
+    const CameraCalibration calib,
     float2& uv_out,
     char& valid_out
 ) {
+    // The Double Sphere Camera Model (https://arxiv.org/abs/1807.08957)
+    // Matches Python implementation in utils.py
     const Intrinsics& intr = calib.intrinsics;
     
-    // Translate by xi (second sphere center)
-    float z_shifted = point.z + intr.xi;
-    
-    // Project to first sphere
-    float r_xy2 = point.x * point.x + point.y * point.y;
-    float r = sqrtf(r_xy2 + z_shifted * z_shifted);
-    
-    if (r < 0.0001f) {
-        uv_out = make_float2(intr.cx, intr.cy);
-        valid_out = 0;
-        return;
-    }
-    
-    // Project to second sphere (image plane)
+    float xi = intr.xi;
     float alpha = intr.alpha;
-    float m = alpha * r + (1.0f - alpha) * z_shifted;
     
-    if (m < 0.0001f) {
-        uv_out = make_float2(intr.cx, intr.cy);
+    // d1 = norm(point)
+    float d1 = sqrtf(point.x * point.x + point.y * point.y + point.z * point.z);
+    if (d1 < 1e-6f) {
+        uv_out = make_float2(-1.0f, -1.0f);
         valid_out = 0;
         return;
     }
     
-    float mx = point.x / m;
-    float my = point.y / m;
+    // c = xi * d1 + point.z
+    float c = xi * d1 + point.z;
     
-    float u = intr.fx * mx + intr.cx;
-    float v = intr.fy * my + intr.cy;
+    // d2 = norm([point.xy, c])
+    float d2 = sqrtf(point.x * point.x + point.y * point.y + c * c);
+    if (d2 < 1e-6f) {
+        uv_out = make_float2(-1.0f, -1.0f);
+        valid_out = 0;
+        return;
+    }
+    
+    // norm = alpha * d2 + (1 - alpha) * c
+    float norm = alpha * d2 + (1.0f - alpha) * c;
+    if (fabsf(norm) < 1e-6f) {
+        uv_out = make_float2(-1.0f, -1.0f);
+        valid_out = 0;
+        return;
+    }
+    
+    // Validity check
+    float w1, w2;
+    if (alpha > 0.5f) {
+        w1 = (1.0f - alpha) / alpha;
+    } else {
+        w1 = alpha / (1.0f - alpha);
+    }
+    w2 = (w1 + xi) / sqrtf(2.0f * w1 * xi + xi * xi + 1.0f);
+    
+    // valid = point.z > -w2 * d1
+    if (point.z <= -w2 * d1) {
+        uv_out = make_float2(-1.0f, -1.0f);
+        valid_out = 0;
+        return;
+    }
+    
+    // uv = (fl * point.xy) / norm + principal
+    float u = (intr.fx * point.x) / norm + intr.cx;
+    float v = (intr.fy * point.y) / norm + intr.cy;
     
     uv_out = make_float2(u, v);
     valid_out = 1;

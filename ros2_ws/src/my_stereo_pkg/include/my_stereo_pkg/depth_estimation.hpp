@@ -29,16 +29,27 @@ typedef unsigned char uchar;
 /**
  * Double Sphere Distortion Model
  * Following the calibration model from EuRoC/TUM-VI datasets
+ * Compatible with utils_kernel.cuh's CameraCalibration structure
  */
 struct __align__(16) DoubleSphereCalibration {
-    // 4x4 rigid body transformation matrix (row-major)
-    float rt[16];           
+    // Intrinsics
     float fx, fy;           // focal lengths
     float cx, cy;           // principal point
     float xi;               // first sphere parameter
     float alpha;            // second sphere parameter
-    float width, height;    // image dimensions
-    int padding;            // alignment
+    
+    // Extrinsics (relative transformation from reference camera)
+    float R[9];             // 3x3 rotation matrix (row-major)
+    float t[3];             // translation vector
+    
+    // Resolution and scale
+    float width, height;    // image dimensions (matching resolution)
+    float matching_scale;   // scale factor from original to matching resolution
+    
+    // Legacy RT matrix for backward compatibility (will be deprecated)
+    float rt[16];           // 4x4 rigid body transformation (row-major)
+    
+    int padding;            // alignment padding
 };
 
 /**
@@ -91,6 +102,7 @@ void select_best_cameras_kernel(
  * @param d_images Array of target images for sweeping
  * @param d_selected_cameras Per-pixel camera selection (adaptive matching)
  * @param d_calibrations Camera calibration array
+ * @param reference_calib Reference camera calibration (passed explicitly)
  * @param d_guide Guide image for filtering (Y channel)
  * @param config Camera configuration
  * @param stream CUDA stream
@@ -102,6 +114,7 @@ void estimate_fisheye_distance_fused_kernel(
     const uchar4* const* d_images,
     const int* d_selected_cameras,
     const DoubleSphereCalibration* d_calibrations,
+    const DoubleSphereCalibration& reference_calib,
     const uchar* d_guide,
     const CameraConfig& config,
     cudaStream_t stream,
@@ -216,7 +229,7 @@ private:
     void allocate_gpu_memory();
     void deallocate_gpu_memory();
     void upload_calibrations();
-    void upload_masks();
+    void precompute_relative_calibrations();
 
     // ========================================================================
     // Processing Kernels
@@ -242,14 +255,27 @@ private:
     int num_cameras_;
     std::vector<int> image_widths_;
     std::vector<int> image_heights_;
+    int rgb_to_stitch_width_;
+    int rgb_to_stitch_height_;
+    int panorama_width_;
+    int panorama_height_;
     
     // GPU Memory Pointers (device)
-    DoubleSphereCalibration* d_calibrations_;           // Constant memory
+    DoubleSphereCalibration* d_calibrations_;           // Device memory (for copying to constant)
     std::vector<float*> d_masks_;                       // Validity masks
     
-    float* d_distance_map_;                            // Output distance
+    float* d_distance_map_;                            // Output distance (pitched)
+    size_t distance_pitch_;                            // Pitched memory stride
     float* d_cost_volume_;                             // Intermediate cost volume
+    size_t cost_volume_pitch_;                         // Pitched memory stride
+    
+    // Pre-allocated target images (avoid runtime malloc/free)
+    std::vector<uchar4*> d_target_images_;             // Target images on GPU
+    std::vector<cudaArray*> d_target_arrays_;          // CUDA arrays for textures
     std::vector<cudaTextureObject_t> d_image_texobjs_; // Texture objects for images
+    
+    // Pre-computed relative RT matrices (avoids runtime computation)
+    std::vector<std::vector<DoubleSphereCalibration>> relative_calibrations_; // [ref_idx][cam_idx]
     
     // CPU-side temporary buffers for data transfer
     std::vector<uint8_t> h_reference_image_;
@@ -265,3 +291,42 @@ private:
 };
 
 #endif // DEPTH_ESTIMATION_HPP
+
+/**
+ * Generate full cost volume (Python-equivalent pipeline)
+ */
+void compute_cost_volume_kernel(
+    float* d_cost_volume,
+    const uchar4* d_reference_image,
+    const uchar4* const* d_images,
+    const int* d_selected_cameras,
+    const DoubleSphereCalibration* d_calibrations,
+    const DoubleSphereCalibration& reference_calib,
+    const CameraConfig& config,
+    cudaStream_t stream,
+    cudaTextureObject_t* d_texobjs
+);
+
+/**
+ * Select distance from filtered cost volume with quadratic fitting
+ */
+void select_distance_from_cost_volume_kernel(
+    float* d_distance_map,
+    const float* d_cost_volume,
+    const CameraConfig& config,
+    cudaStream_t stream
+);
+
+/**
+ * Apply ISB Filter to cost volume (multi-scale bilateral filtering)
+ */
+void apply_isb_filter(
+    uchar3* d_guide,
+    float* d_cost_volume,
+    int width,
+    int height,
+    int candidate_count,
+    float sigma_i,
+    float sigma_s,
+    cudaStream_t stream
+);

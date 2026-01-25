@@ -1,245 +1,75 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
-#include <torch/torch.h>
-#include <torch/extension.h>
 #include <iostream>
-#include "my_stereo_pkg/cuda_kernels.hpp"
-#include "my_stereo_pkg/calibration.hpp"
-#include "my_stereo_pkg/stitcher.hpp"
-#include "my_stereo_pkg/isb_filter.hpp"
+#include "my_stereo_pkg/depth_estimation.hpp"
 
 namespace py = pybind11;
-using namespace my_stereo;
 
-// Custom type casters for CUDA vector types
-namespace pybind11 { namespace detail {
-    template <> struct type_caster<float2> {
-    public:
-        PYBIND11_TYPE_CASTER(float2, _("float2"));
-        
-        bool load(handle src, bool) {
-            if (!py::isinstance<py::tuple>(src) && !py::isinstance<py::list>(src)) {
-                return false;
-            }
-            auto seq = py::reinterpret_borrow<py::sequence>(src);
-            if (seq.size() != 2) return false;
-            
-            value.x = seq[0].cast<float>();
-            value.y = seq[1].cast<float>();
-            return true;
-        }
-        
-        static handle cast(float2 src, return_value_policy, handle) {
-            return py::make_tuple(src.x, src.y).release();
-        }
-    };
+PYBIND11_MODULE(sphere_stereo_cuda, m) {
+    m.doc() = "CUDA-accelerated Sphere Sweeping Stereo implementation";
     
-    template <> struct type_caster<float3> {
-    public:
-        PYBIND11_TYPE_CASTER(float3, _("float3"));
-        
-        bool load(handle src, bool) {
-            if (!py::isinstance<py::tuple>(src) && !py::isinstance<py::list>(src)) {
-                return false;
-            }
-            auto seq = py::reinterpret_borrow<py::sequence>(src);
-            if (seq.size() != 3) return false;
-            
-            value.x = seq[0].cast<float>();
-            value.y = seq[1].cast<float>();
-            value.z = seq[2].cast<float>();
-            return true;
-        }
-        
-        static handle cast(float3 src, return_value_policy, handle) {
-            return py::make_tuple(src.x, src.y, src.z).release();
-        }
-    };
-}} // namespace pybind11::detail
-
-// Helper function to convert numpy to torch tensor
-torch::Tensor numpy_to_torch(pybind11::array_t<float> input) {
-    auto buf = input.request();
+    // RGBD_Estimator binding
+    py::class_<RGBD_Estimator>(m, "RGBD_Estimator")
+        .def(py::init<const std::vector<float>&, const std::vector<float>&,
+                      const std::vector<float>&, const std::vector<float>&,
+                      float, float, int,
+                      const std::vector<int>&, const std::vector<float>&,
+                      const std::vector<int>&, const std::vector<int>&,
+                      int, int, int, int, int, int,
+                      float, float, int>(),
+             py::arg("calibrations_rt"),
+             py::arg("calibrations_intrinsics"),
+             py::arg("calibrations_sphere"),
+             py::arg("calibrations_resolution"),
+             py::arg("min_dist"),
+             py::arg("max_dist"),
+             py::arg("candidate_count"),
+             py::arg("references_indices"),
+             py::arg("reprojection_viewpoint"),
+             py::arg("image_widths"),
+             py::arg("image_heights"),
+             py::arg("matching_width"),
+             py::arg("matching_height"),
+             py::arg("rgb_to_stitch_width"),
+             py::arg("rgb_to_stitch_height"),
+             py::arg("panorama_width"),
+             py::arg("panorama_height"),
+             py::arg("sigma_i"),
+             py::arg("sigma_s"),
+             py::arg("device") = 0,
+             "Initialize RGBD_Estimator with camera calibrations and parameters")
+        .def("estimate_RGBD_panorama",
+             [](RGBD_Estimator& self,
+                const std::vector<std::vector<float>>& images_to_match,
+                const std::vector<std::vector<float>>& images_to_stitch) {
+                 auto result = self.estimate_RGBD_panorama(images_to_match, images_to_stitch);
+                 
+                 // Convert to numpy arrays
+                 py::array_t<uint8_t> rgb_array(result.first.size());
+                 py::array_t<float> distance_array(result.second.size());
+                 
+                 auto rgb_buf = rgb_array.request();
+                 auto dist_buf = distance_array.request();
+                 
+                 std::memcpy(rgb_buf.ptr, result.first.data(), result.first.size() * sizeof(uint8_t));
+                 std::memcpy(dist_buf.ptr, result.second.data(), result.second.size() * sizeof(float));
+                 
+                 return py::make_tuple(rgb_array, distance_array);
+             },
+             "Estimate RGB-D panorama from fisheye images",
+             py::arg("images_to_match"),
+             py::arg("images_to_stitch"));
     
-    // Create torch tensor from numpy data
-    std::vector<int64_t> shape;
-    for (auto dim : buf.shape) {
-        shape.push_back(dim);
-    }
-    
-    // Create tensor options
-    auto options = torch::TensorOptions()
-                      .dtype(torch::kFloat32)
-                      .device(torch::kCPU);
-    
-    // Create tensor from data
-    return torch::from_blob(buf.ptr, shape, options).clone();
-}
-
-void test_connection(pybind11::array_t<float> np_input) {
-    std::cout << "Hello from C++!" << std::endl;
-    
-    // Convert numpy to torch tensor
-    auto tensor = numpy_to_torch(np_input);
-    
-    std::cout << "Tensor shape: " << tensor.sizes() << std::endl;
-    std::cout << "Tensor device: " << tensor.device() << std::endl;
-    std::cout << "Tensor dtype: " << tensor.dtype() << std::endl;
-    
-    // Basic tensor operations
-    auto tensor_sum = tensor.sum();
-    std::cout << "Tensor sum: " << tensor_sum.item<float>() << std::endl;
-    
-    // Test if CUDA is available
-    if (torch::cuda::is_available()) {
-        std::cout << "CUDA is available in C++!" << std::endl;
-        std::cout << "CUDA device count: " << torch::cuda::device_count() << std::endl;
-    } else {
-        std::cout << "CUDA is not available in C++" << std::endl;
-    }
-}
-
-PYBIND11_MODULE(_core_cpp, m) {
-    m.doc() = "My Stereo Package C++ Core Module with PyTorch support";
-    m.def("test_connection", &test_connection, "Test connection with numpy->torch conversion");
-    
-    // Calibration struct binding
-    py::class_<Calibration>(m, "Calibration")
+    // DoubleSphereCalibration binding (for testing/inspection)
+    py::class_<DoubleSphereCalibration>(m, "DoubleSphereCalibration")
         .def(py::init<>())
-        .def_readwrite("fl", &Calibration::fl, "Focal length (fx, fy)")
-        .def_readwrite("principal", &Calibration::principal, "Principal point (cx, cy)")
-        .def_readwrite("xi", &Calibration::xi, "First distortion parameter")
-        .def_readwrite("alpha", &Calibration::alpha, "Second distortion parameter")
-        .def_readwrite("matching_scale", &Calibration::matching_scale, "Scale factor for matching resolution")
-        .def_readwrite("rt", &Calibration::rt, "Extrinsic matrix [4, 4]");
-    
-    // Stitcher class binding
-    py::class_<Stitcher>(m, "Stitcher")
-        .def(py::init<
-            const std::vector<Calibration>&,  // calibrations
-            const at::Tensor&,                 // reprojection_viewpoint
-            const at::Tensor&,                 // masks
-            float,                             // min_dist
-            float,                             // max_dist
-            int,                               // matching_cols
-            int,                               // matching_rows
-            int,                               // rgb_to_stitch_cols
-            int,                               // rgb_to_stitch_rows
-            int,                               // panorama_cols
-            int,                               // panorama_rows
-            const at::Device&,                 // device
-            int,                               // smoothing_radius (default: 15)
-            int                                // inpainting_iterations (default: 32)
-        >(),
-        py::arg("calibrations"),
-        py::arg("reprojection_viewpoint"),
-        py::arg("masks"),
-        py::arg("min_dist"),
-        py::arg("max_dist"),
-        py::arg("matching_cols"),
-        py::arg("matching_rows"),
-        py::arg("rgb_to_stitch_cols"),
-        py::arg("rgb_to_stitch_rows"),
-        py::arg("panorama_cols"),
-        py::arg("panorama_rows"),
-        py::arg("device"),
-        py::arg("smoothing_radius") = 15,
-        py::arg("inpainting_iterations") = 32,
-        "Create RGB-D panorama stitcher for fisheye cameras")
-        .def("stitch", &Stitcher::stitch,
-            py::arg("images"),
-            py::arg("distance_maps"),
-            "Stitch fisheye images and distance maps into RGB-D panorama\n\n"
-            "Args:\n"
-            "    images: List of [H, W, 3] uint8 color fisheye images\n"
-            "    distance_maps: List of [H, W] float32 distance maps\n\n"
-            "Returns:\n"
-            "    Tuple of (RGB panorama [H, W, 3] uint8, distance panorama [H, W] float32)");
-    
-    // ISBFilter class binding for edge-preserving cost volume filtering
-    py::class_<my_stereo_pkg::ISBFilter>(m, "ISBFilter")
-        .def(py::init<int, const std::pair<int, int>&, const at::Device&>(),
-            py::arg("candidate_count"),
-            py::arg("resolution"),
-            py::arg("device"),
-            "Create ISB Filter for edge-preserving cost volume aggregation\n\n"
-            "Args:\n"
-            "    candidate_count: Number of depth candidates (cost volume channels)\n"
-            "    resolution: Tuple of (cols, rows) for the image resolution\n"
-            "    device: CUDA device for processing (e.g., torch.device('cuda:0'))")
-        .def("apply", &my_stereo_pkg::ISBFilter::apply,
-            py::arg("guide"),
-            py::arg("cost"),
-            py::arg("sigma_i"),
-            py::arg("sigma_s"),
-            "Apply edge-preserving filter to cost volume\n\n"
-            "Args:\n"
-            "    guide: Guide image [H, W, 3] (uint8) for edge preservation\n"
-            "    cost: Cost volume [candidate_count, H, W] (float32) to be filtered\n"
-            "    sigma_i: Edge preservation parameter (lower = preserve edges more)\n"
-            "    sigma_s: Smoothing parameter (higher = more smoothing from coarse scales)\n\n"
-            "Returns:\n"
-            "    Tuple of (filtered cost volume [candidate_count, H, W], filtered guide [H, W, 3])")
-        .def("get_scale_count", &my_stereo_pkg::ISBFilter::get_scale_count,
-            "Get the number of pyramid scales used");
-    
-    // Temporarily comment out CUDA wrapper functions until signatures are fixed
-    /*
-    // CUDA wrapper functions
-    m.def("reproject_distance", &launch_reproject_distance, 
-          "Reproject distance map using z-buffering",
-          py::arg("distance_in"), py::arg("distance_out"), 
-          py::arg("cam_params"), py::arg("translation"),
-          py::arg("cols"), py::arg("rows"));
-    
-    m.def("create_inpainting_weights", &launch_create_inpainting_weights,
-          "Create inpainting weights based on occlusion direction",
-          py::arg("inpaint_weights"), py::arg("cam_params"), 
-          py::arg("translation"), py::arg("cols"), py::arg("rows"),
-          py::arg("min_dist"), py::arg("max_dist"));
-    
-    m.def("inpaint", &launch_inpaint,
-          "Fill holes in distance map using inpainting",
-          py::arg("distance_map"), py::arg("inpaint_weights"),
-          py::arg("cols"), py::arg("rows"), py::arg("max_dist"));
-    
-    m.def("create_blending_lut", &launch_create_blending_lut,
-          "Create sampling and blending lookup tables",
-          py::arg("sampling_lut"), py::arg("blending_weights"),
-          py::arg("masks"), py::arg("cam_params_list"),
-          py::arg("rotations"), py::arg("translations"),
-          py::arg("pano_cols"), py::arg("pano_rows"),
-          py::arg("cols"), py::arg("rows"),
-          py::arg("min_dist"), py::arg("max_dist"));
-    
-    m.def("merge_rgbd_panorama", &launch_merge_rgbd_panorama,
-          "Merge RGBD panorama from multiple cameras",
-          py::arg("sampling_lut"), py::arg("blending_weights"),
-          py::arg("reprojected_distance_maps"), py::arg("distance_maps"),
-          py::arg("stitching_imgs"), py::arg("translations"),
-          py::arg("cam_params_list"), py::arg("distance_panorama"),
-          py::arg("rgb_panorama"), py::arg("pano_cols"), py::arg("pano_rows"),
-          py::arg("cols"), py::arg("rows"),
-          py::arg("stitching_imgs_rows"), py::arg("stitching_imgs_cols"));
-    */
-    
-    // CUDA kernel helper structs
-    py::class_<Intrinsics>(m, "Intrinsics")
-        .def(py::init<>())
-        .def_readwrite("fl", &Intrinsics::fl)
-        .def_readwrite("principal", &Intrinsics::principal)
-        .def_readwrite("xi", &Intrinsics::xi)
-        .def_readwrite("alpha", &Intrinsics::alpha);
-    
-    py::class_<Rotation>(m, "Rotation")
-        .def(py::init<>());
-        
-    py::class_<CamParams>(m, "CamParams")
-        .def(py::init<>())
-        .def_readwrite("intrinsics", &CamParams::intrinsics);
-        
-    py::class_<RotationParams>(m, "RotationParams")
-        .def(py::init<>())
-        .def_readwrite("rotation", &RotationParams::rotation);
+        .def_readwrite("fx", &DoubleSphereCalibration::fx)
+        .def_readwrite("fy", &DoubleSphereCalibration::fy)
+        .def_readwrite("cx", &DoubleSphereCalibration::cx)
+        .def_readwrite("cy", &DoubleSphereCalibration::cy)
+        .def_readwrite("xi", &DoubleSphereCalibration::xi)
+        .def_readwrite("alpha", &DoubleSphereCalibration::alpha)
+        .def_readwrite("width", &DoubleSphereCalibration::width)
+        .def_readwrite("height", &DoubleSphereCalibration::height);
 }
