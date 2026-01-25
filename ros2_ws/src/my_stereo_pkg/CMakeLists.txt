@@ -208,41 +208,43 @@ endif()
 # Test: Depth Estimation
 # ============================================================================
 
-add_executable(test_depth_estimation
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../scripts/test_depth_estimation.cpp
-)
-
-target_include_directories(test_depth_estimation PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-)
-
-target_link_libraries(test_depth_estimation PRIVATE
-    sphere_stereo_utils
-)
-
-install(TARGETS test_depth_estimation
-    RUNTIME DESTINATION lib/${PROJECT_NAME}
-)
+# Commented out - test file moved to organized test suite
+# add_executable(test_depth_estimation
+#     ${CMAKE_CURRENT_SOURCE_DIR}/../../scripts/test_depth_estimation.cpp
+# )
+# 
+# target_include_directories(test_depth_estimation PRIVATE
+#     ${CMAKE_CURRENT_SOURCE_DIR}/include
+# )
+# 
+# target_link_libraries(test_depth_estimation PRIVATE
+#     sphere_stereo_utils
+# )
+# 
+# install(TARGETS test_depth_estimation
+#     RUNTIME DESTINATION lib/${PROJECT_NAME}
+# )
 
 # ============================================================================
 # Test: GPU Kernel (existing)
 # ============================================================================
 
-add_executable(test_gpu_kernel
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../scripts/test_gpu_kernel.cpp
-)
+# Commented out - test file moved to organized test suite
+# add_executable(test_gpu_kernel
+#     ${CMAKE_CURRENT_SOURCE_DIR}/../../scripts/test_gpu_kernel.cpp
+# )
+# 
+# target_include_directories(test_gpu_kernel PRIVATE
+#     ${CMAKE_CURRENT_SOURCE_DIR}/include
+# )
+# 
+# target_link_libraries(test_gpu_kernel PRIVATE
+#     sphere_stereo_utils
+# )
 
-target_include_directories(test_gpu_kernel PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-)
-
-target_link_libraries(test_gpu_kernel PRIVATE
-    sphere_stereo_utils
-)
-
-install(TARGETS test_gpu_kernel
-    RUNTIME DESTINATION lib/${PROJECT_NAME}
-)
+# install(TARGETS test_gpu_kernel
+#     RUNTIME DESTINATION lib/${PROJECT_NAME}
+# )
 
 # ============================================================================
 # Test: Minimal Depth Estimation (DISABLED - missing test file)

@@ -1,0 +1,58 @@
+{
+  "timestamp": "2026-01-25T17:39:53.151007",
+  "device": "cuda:0",
+  "minimal_mode": true,
+  "summary": {
+    "total": 5,
+    "passed": 0,
+    "failed": 5,
+    "duration": 12.053326
+  },
+  "results": [
+    {
+      "name": "ISB Filter Verification",
+      "script": "/home/motoken/college/ros2_ws/scripts/archive_old_files/verify_isb_filter.py",
+      "success": false,
+      "duration": 2.708891,
+      "return_code": 1,
+      "stdout": "",
+      "stderr": "Traceback (most recent call last):\n  File \"/home/motoken/college/ros2_ws/scripts/archive_old_files/verify_isb_filter.py\", line 37, in <module>\n    from my_stereo_pkg import ISBFilter as CppFilter\nModuleNotFoundError: No module named 'my_stereo_pkg'\n"
+    },
+    {
+      "name": "Stitcher Verification",
+      "script": "/home/motoken/college/ros2_ws/scripts/archive_old_files/verify_stitcher.py",
+      "success": false,
+      "duration": 3.634984,
+      "return_code": 1,
+      "stdout": "\ud83d\udd0d Checking Python environment...\n   Python: /usr/bin/python3\n   PyTorch: 2.4.0a0+07cecf4168.nv24.05\n   CuPy: 13.6.0\n   \u2705 Python Stitcher imported from sphere-stereo\n   \u274c Failed to import C++ Stitcher: No module named 'my_stereo_pkg'\n   Make sure ROS 2 workspace is sourced\n",
+      "stderr": ""
+    },
+    {
+      "name": "Utils Verification",
+      "script": "/home/motoken/college/ros2_ws/scripts/archive_old_files/verify_utils.py",
+      "success": false,
+      "duration": 0.8803,
+      "return_code": 1,
+      "stdout": "======================================================================\nPython vs C++/CUDA Complete Utilities Verification\n======================================================================\n\nCalibration: fx=400.0, fy=400.0, cx=320.0, cy=240.0, xi=0.0, alpha=0.5\n\n======================================================================\nTEST 1: UNPROJECT (Pixel \u2192 3D)\n======================================================================\n\nPixel                Python X,Y,Z                        C++ X,Y,Z                           Error           Status\n--------------------------------------------------------------------------------------------------------------\n\n======================================================================\nTEST 2: PROJECT (3D \u2192 Pixel)\n======================================================================\n\n3D Point                  Python U,V           C++ U,V              Error           Status\n-----------------------------------------------------------------------------------------------\n\n======================================================================\nTEST 3: RGB TO YCbCr CONVERSION\n======================================================================\n\nRGB                  Python YCbCr         C++ YCbCr            Error           Status\n------------------------------------------------------------------------------------------\n\n======================================================================\nTEST 4: BILINEAR RESAMPLING\n======================================================================\n\nCoord (U,V)          Python RGB           C++ RGB              Error           Status\n------------------------------------------------------------------------------------------\n\n======================================================================\nSTATISTICAL SUMMARY\n======================================================================\n\nCalibration: fx=400.0, fy=400.0, cx=320.0, cy=240.0, xi=0.0, alpha=0.5\n\n======================================================================\nTEST 1: UNPROJECT (Pixel \u2192 3D)\n======================================================================\n\nPixel                Python X,Y,Z                        C++ X,Y,Z                           Error           Status\n--------------------------------------------------------------------------------------------------------------\n\n======================================================================\nTEST 2: PROJECT (3D \u2192 Pixel)\n======================================================================\n\n3D Point                  Python U,V           C++ U,V              Error           Status\n-----------------------------------------------------------------------------------------------\n\n======================================================================\nSTATISTICAL SUMMARY\n======================================================================\n\nUnproject Tests:\n  - Count:     0\n\nProject Tests:\n  - Count:     0\n\nRGB2YCbCr Tests:\n  - Count:     0\n\nBilinear Resampling Tests:\n  - Count:     0\n\nOverall:\n  - Total Tests: 0\n\n======================================================================\nFINAL VERDICT\n======================================================================\n\n\u2705 100% EQUIVALENCE PROVEN FOR ALL UTILITIES\n   All 0 tests passed\n",
+      "stderr": "Traceback (most recent call last):\n  File \"/home/motoken/college/ros2_ws/scripts/archive_old_files/verify_utils.py\", line 675, in <module>\n    sys.exit(verify_equivalence())\n  File \"/home/motoken/college/ros2_ws/scripts/archive_old_files/verify_utils.py\", line 660, in verify_equivalence\n    print(f\"   Maximum error: {max(all_errors):.2e}\")\nValueError: max() arg is an empty sequence\n"
+    },
+    {
+      "name": "Equivalence Test (Full)",
+      "script": "/home/motoken/college/ros2_ws/scripts/archive_old_files/verify_equivalence.py",
+      "success": false,
+      "duration": 4.611421,
+      "return_code": 1,
+      "stdout": "\u2713 Added ROS2 library path: /home/motoken/college/ros2_ws/scripts/install/my_stereo_pkg/lib\n\u2713 Python implementation loaded\n\u2717 Failed to load C++/CUDA implementation: No module named 'sphere_stereo_cuda'\n",
+      "stderr": ""
+    },
+    {
+      "name": "Equivalence Test (Minimal)",
+      "script": "/home/motoken/college/ros2_ws/scripts/archive_old_files/verify_equivalence_minimal.py",
+      "success": false,
+      "duration": 0.21773,
+      "return_code": 1,
+      "stdout": "\u2717 Failed to load C++/CUDA module: No module named 'sphere_stereo_cuda'\n",
+      "stderr": ""
+    }
+  ]
+}
