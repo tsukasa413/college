@@ -30,9 +30,19 @@ void CameraCalibrationGPU::initialize_from_host(
 }
 
 CameraCalibration CameraCalibrationGPU::get_host_copy() const {
+    if (!d_calib_) {
+        std::cerr << "[CameraCalibrationGPU] Error: d_calib_ is nullptr!" << std::endl;
+        throw std::runtime_error("CameraCalibrationGPU not initialized (d_calib_ is null)");
+    }
+    
     CameraCalibration h_calib;
-    CUDA_CHECK(cudaMemcpy(&h_calib, d_calib_, sizeof(CameraCalibration),
-                          cudaMemcpyDeviceToHost));
+    cudaError_t err = cudaMemcpy(&h_calib, d_calib_, sizeof(CameraCalibration),
+                                 cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) {
+        std::cerr << "[CameraCalibrationGPU] cudaMemcpy failed: " << cudaGetErrorString(err) << std::endl;
+        throw std::runtime_error("CUDA error: " + std::string(cudaGetErrorString(err)));
+    }
+    
     return h_calib;
 }
 
@@ -50,21 +60,144 @@ std::vector<CameraCalibrationGPU> CalibrationParser::load_json_basalt(
         throw std::runtime_error("Cannot open calibration file: " + json_path);
     }
     
-    nlohmann::json root = nlohmann::json::parse(file);
+    nlohmann::json file_root = nlohmann::json::parse(file);
+    
+    // Extract value0 if it exists (Basalt format)
+    nlohmann::json root;
+    if (file_root.contains("value0")) {
+        root = file_root["value0"];
+    } else {
+        root = file_root;
+    }
+    
     std::vector<CameraCalibrationGPU> calibrations;
     
-    for (auto& [key, cam_json] : root.items()) {
-        if (key.substr(0, 3) == "cam") {
-            auto calib_gpu = parse_camera_json(
-                cam_json,
-                matching_resolution,
-                original_resolution
+    // Check if this is Basalt array format (T_imu_cam, intrinsics arrays)
+    if (root.contains("T_imu_cam") && root.contains("intrinsics")) {
+        // Basalt array format
+        auto extrinsics_array = root["T_imu_cam"];
+        auto intrinsics_array = root["intrinsics"];
+        
+        // Get resolutions
+        std::vector<std::vector<int>> resolutions;
+        if (root.contains("resolution")) {
+            resolutions = root["resolution"].get<std::vector<std::vector<int>>>();
+        } else {
+            // Use provided original_resolution for all cameras
+            for (size_t i = 0; i < extrinsics_array.size(); ++i) {
+                resolutions.push_back(original_resolution);
+            }
+        }
+        
+        // Parse each camera
+        for (size_t i = 0; i < extrinsics_array.size(); ++i) {
+            auto calib_gpu = parse_basalt_camera(
+                extrinsics_array[i],
+                intrinsics_array[i],
+                resolutions[i],
+                matching_resolution
             );
             calibrations.push_back(std::move(calib_gpu));
+        }
+    } else {
+        // Old format: cam0, cam1, etc.
+        for (auto& [key, cam_json] : root.items()) {
+            if (key.substr(0, 3) == "cam") {
+                auto calib_gpu = parse_camera_json(
+                    cam_json,
+                    matching_resolution,
+                    original_resolution
+                );
+                calibrations.push_back(std::move(calib_gpu));
+            }
         }
     }
     
     return calibrations;
+}
+
+CameraCalibrationGPU CalibrationParser::parse_basalt_camera(
+    const nlohmann::json& extrinsics_json,
+    const nlohmann::json& intrinsics_json,
+    const std::vector<int>& original_resolution,
+    const std::vector<int>& matching_resolution
+) {
+    CameraCalibration h_calib;
+    
+    // Check camera type
+    std::string camera_type = intrinsics_json["camera_type"].get<std::string>();
+    if (camera_type != "ds") {
+        throw std::runtime_error("Unsupported camera type: " + camera_type + ". Only 'ds' (double sphere) is supported.");
+    }
+    
+    // Parse intrinsics
+    auto cam_intrinsics = intrinsics_json["intrinsics"];
+    h_calib.intrinsics.fx = cam_intrinsics["fx"].get<float>();
+    h_calib.intrinsics.fy = cam_intrinsics["fy"].get<float>();
+    h_calib.intrinsics.cx = cam_intrinsics["cx"].get<float>();
+    h_calib.intrinsics.cy = cam_intrinsics["cy"].get<float>();
+    h_calib.intrinsics.xi = cam_intrinsics["xi"].get<float>();
+    h_calib.intrinsics.alpha = cam_intrinsics["alpha"].get<float>();
+    
+    // Parse resolution
+    h_calib.resolution_x = original_resolution[0];
+    h_calib.resolution_y = original_resolution[1];
+    
+    // Parse extrinsics (quaternion + translation)
+    float qx = extrinsics_json["qx"].get<float>();
+    float qy = extrinsics_json["qy"].get<float>();
+    float qz = extrinsics_json["qz"].get<float>();
+    float qw = extrinsics_json["qw"].get<float>();
+    
+    float px = extrinsics_json["px"].get<float>();
+    float py = extrinsics_json["py"].get<float>();
+    float pz = extrinsics_json["pz"].get<float>();
+    
+    // Convert quaternion to rotation matrix
+    // R = I + 2*q_v*q_v^T + 2*q_w*[q_v]_x
+    float x2 = qx * qx;
+    float y2 = qy * qy;
+    float z2 = qz * qz;
+    float xy = qx * qy;
+    float xz = qx * qz;
+    float yz = qy * qz;
+    float wx = qw * qx;
+    float wy = qw * qy;
+    float wz = qw * qz;
+    
+    h_calib.extrinsics.rotation[0][0] = 1.0f - 2.0f * (y2 + z2);
+    h_calib.extrinsics.rotation[0][1] = 2.0f * (xy - wz);
+    h_calib.extrinsics.rotation[0][2] = 2.0f * (xz + wy);
+    
+    h_calib.extrinsics.rotation[1][0] = 2.0f * (xy + wz);
+    h_calib.extrinsics.rotation[1][1] = 1.0f - 2.0f * (x2 + z2);
+    h_calib.extrinsics.rotation[1][2] = 2.0f * (yz - wx);
+    
+    h_calib.extrinsics.rotation[2][0] = 2.0f * (xz - wy);
+    h_calib.extrinsics.rotation[2][1] = 2.0f * (yz + wx);
+    h_calib.extrinsics.rotation[2][2] = 1.0f - 2.0f * (x2 + y2);
+    
+    h_calib.extrinsics.translation[0] = px;
+    h_calib.extrinsics.translation[1] = py;
+    h_calib.extrinsics.translation[2] = pz;
+    
+    // Compute matching resolution scale
+    h_calib.matching_scale = 
+        static_cast<float>(matching_resolution[0]) / 
+        static_cast<float>(original_resolution[0]);
+    
+    std::cout << "[CalibrationParser] Creating CameraCalibrationGPU..." << std::endl;
+    std::cout << "  Intrinsics: fx=" << h_calib.intrinsics.fx << ", fy=" << h_calib.intrinsics.fy << std::endl;
+    std::cout << "  Translation: [" << h_calib.extrinsics.translation[0] << ", " 
+              << h_calib.extrinsics.translation[1] << ", " 
+              << h_calib.extrinsics.translation[2] << "]" << std::endl;
+    
+    CameraCalibrationGPU calib_gpu;
+    calib_gpu.initialize_from_host(h_calib);
+    
+    std::cout << "[CalibrationParser] CameraCalibrationGPU initialized successfully" << std::endl;
+    
+    return calib_gpu;
 }
 
 CameraCalibrationGPU CalibrationParser::parse_camera_json(
