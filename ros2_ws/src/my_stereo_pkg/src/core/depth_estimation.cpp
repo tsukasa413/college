@@ -85,20 +85,20 @@ RGBD_Estimator::RGBD_Estimator(
 )
     : device_id_(device),
       num_cameras_(image_widths.size()),
+      references_indices_(references_indices),
       image_widths_(image_widths),
       image_heights_(image_heights),
       rgb_to_stitch_width_(rgb_to_stitch_width),
       rgb_to_stitch_height_(rgb_to_stitch_height),
       panorama_width_(panorama_width),
       panorama_height_(panorama_height),
-      sigma_i_(sigma_i),
-      sigma_s_(sigma_s),
-      references_indices_(references_indices),
       d_calibrations_(nullptr),
       d_distance_map_(nullptr),
       distance_pitch_(0),
       d_cost_volume_(nullptr),
-      cost_volume_pitch_(0)
+      cost_volume_pitch_(0),
+      sigma_i_(sigma_i),
+      sigma_s_(sigma_s)
 {
     CUDA_CHECK(cudaSetDevice(device_id_));
     
@@ -148,7 +148,7 @@ RGBD_Estimator::RGBD_Estimator(
         
         // Original resolution from calibration data
         float original_width = calibrations_resolution[i * 2 + 0];
-        float original_height = calibrations_resolution[i * 2 + 1];
+        // float original_height = calibrations_resolution[i * 2 + 1];  // Unused
         
         // Matching resolution (target size for depth estimation)
         calib.width = matching_width;
@@ -202,7 +202,7 @@ RGBD_Estimator::RGBD_Estimator(
 // ============================================================================
 
 RGBD_Estimator::~RGBD_Estimator() {
-    CUDA_CHECK(cudaSetDevice(device_id_));
+    cudaSetDevice(device_id_);
     
     deallocate_gpu_memory();
     
