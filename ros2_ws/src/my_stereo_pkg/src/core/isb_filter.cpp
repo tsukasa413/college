@@ -135,7 +135,8 @@ std::pair<at::Tensor, at::Tensor> ISBFilter::apply(
             cols_high,
             candidate_count_,
             var_inv_i,
-            weight_up
+            weight_up,
+            weight_down
         );
     }
     

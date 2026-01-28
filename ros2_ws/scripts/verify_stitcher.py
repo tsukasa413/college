@@ -58,7 +58,7 @@ print("")
 # Resource paths
 RESOURCES_DIR = Path('/home/motoken/college/sphere-stereo/resources')
 CALIB_FILE = RESOURCES_DIR / 'calibration.json'
-OUTPUT_DIR = Path('/tmp/stitcher_verification')
+OUTPUT_DIR = Path('/home/motoken/college/ros2_ws/output')
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 def quaternion_to_rotation_matrix(qx, qy, qz, qw):
@@ -130,7 +130,7 @@ def load_calibrations(calib_file, device):
         cpp_calib.principal = (cx, cy)
         cpp_calib.xi = xi
         cpp_calib.alpha = alpha
-        cpp_calib.matching_scale = 1.0
+        cpp_calib.matching_scale = (1.0, 1.0)  # float2 type
         cpp_calib.rt = rt_tensor
         cpp_calibs.append(cpp_calib)
     
@@ -327,7 +327,7 @@ def main():
     # Update matching scale in calibrations
     for py_calib, cpp_calib in zip(python_calibs, cpp_calibs):
         py_calib.matching_scale = matching_scale
-        cpp_calib.matching_scale = matching_scale
+        cpp_calib.matching_scale = (matching_scale, matching_scale)  # float2 type
     
     # Downsample masks for matching resolution
     masks_matching = torch.nn.functional.interpolate(
