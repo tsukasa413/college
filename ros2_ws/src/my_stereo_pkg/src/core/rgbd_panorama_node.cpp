@@ -10,6 +10,7 @@
 #include <nlohmann/json.hpp>
 #include <fstream>
 #include <chrono>
+#include <filesystem>
 
 namespace my_stereo_pkg {
 
@@ -33,6 +34,8 @@ RGBDPanoramaNode::RGBDPanoramaNode(const rclcpp::NodeOptions& options)
     this->declare_parameter<std::vector<int64_t>>("original_resolution", {1944, 1096});
     this->declare_parameter<int>("device_id", 0);
     this->declare_parameter<double>("fps", 10.0);  // Lower FPS for CUDA processing
+    this->declare_parameter<bool>("use_test_images", false);
+    this->declare_parameter<std::string>("test_images_dir", "");
 
     calibration_path_ = this->get_parameter("calibration_path").as_string();
     references_indices_ = this->get_parameter("references_indices").as_integer_array();
@@ -47,6 +50,8 @@ RGBDPanoramaNode::RGBDPanoramaNode(const rclcpp::NodeOptions& options)
     original_resolution_ = this->get_parameter("original_resolution").as_integer_array();
     device_id_ = this->get_parameter("device_id").as_int();
     fps_ = this->get_parameter("fps").as_double();
+    use_test_images_ = this->get_parameter("use_test_images").as_bool();
+    test_images_dir_ = this->get_parameter("test_images_dir").as_string();
 
     RCLCPP_INFO(this->get_logger(), "=== RGBD Panorama Node Starting ===");
     RCLCPP_INFO(this->get_logger(), "Calibration: %s", calibration_path_.c_str());
@@ -58,6 +63,10 @@ RGBDPanoramaNode::RGBDPanoramaNode(const rclcpp::NodeOptions& options)
     RCLCPP_INFO(this->get_logger(), "Panorama resolution: [%ld, %ld]",
                 panorama_resolution_[0], panorama_resolution_[1]);
     RCLCPP_INFO(this->get_logger(), "FPS: %.1f", fps_);
+    RCLCPP_INFO(this->get_logger(), "Mode: %s", use_test_images_ ? "Test Images" : "Live Camera");
+    if (use_test_images_) {
+        RCLCPP_INFO(this->get_logger(), "Test images directory: %s", test_images_dir_.c_str());
+    }
 
     // Load calibrations
     load_calibrations();
@@ -65,8 +74,12 @@ RGBDPanoramaNode::RGBDPanoramaNode(const rclcpp::NodeOptions& options)
     // Initialize RGBD Estimator
     initialize_rgbd_estimator();
 
-    // Initialize cameras (direct capture like quad_cam_system)
-    initialize_cameras();
+    // Initialize input source
+    if (use_test_images_) {
+        load_test_images();
+    } else {
+        initialize_cameras();
+    }
 
     // Setup publishers
     pub_rgb_panorama_ = this->create_publisher<sensor_msgs::msg::Image>(
@@ -278,6 +291,49 @@ void RGBDPanoramaNode::initialize_rgbd_estimator() {
     RCLCPP_INFO(this->get_logger(), "RGBD_Estimator initialized successfully");
 }
 
+void RGBDPanoramaNode::load_test_images() {
+    RCLCPP_INFO(this->get_logger(), "Loading test images from: %s", test_images_dir_.c_str());
+    
+    test_images_.resize(4);
+    
+    for (int i = 0; i < 4; i++) {
+        // Load first image from cam{i} directory (skip mask.png)
+        std::string cam_dir = test_images_dir_ + "/cam" + std::to_string(i);
+        
+        // Find first non-mask image file in directory
+        std::string image_path;
+        for (const auto& entry : std::filesystem::directory_iterator(cam_dir)) {
+            if (entry.is_regular_file()) {
+                std::string filename = entry.path().filename().string();
+                std::string ext = entry.path().extension().string();
+                
+                // Skip mask.png and only accept jpg/jpeg/png images
+                if (filename != "mask.png" && 
+                    (ext == ".png" || ext == ".jpg" || ext == ".jpeg")) {
+                    image_path = entry.path().string();
+                    break;
+                }
+            }
+        }
+        
+        if (image_path.empty()) {
+            RCLCPP_ERROR(this->get_logger(), "No image found in %s", cam_dir.c_str());
+            throw std::runtime_error("Test image not found");
+        }
+        
+        test_images_[i] = cv::imread(image_path, cv::IMREAD_COLOR);
+        if (test_images_[i].empty()) {
+            RCLCPP_ERROR(this->get_logger(), "Failed to load image: %s", image_path.c_str());
+            throw std::runtime_error("Failed to load test image");
+        }
+        
+        RCLCPP_INFO(this->get_logger(), "Loaded camera %d: %s (size: %dx%d)",
+                   i, image_path.c_str(), test_images_[i].cols, test_images_[i].rows);
+    }
+    
+    RCLCPP_INFO(this->get_logger(), "All test images loaded successfully");
+}
+
 void RGBDPanoramaNode::initialize_cameras() {
     RCLCPP_INFO(this->get_logger(), "Initializing cameras (GStreamer pipelines)...");
     
@@ -351,40 +407,57 @@ void RGBDPanoramaNode::capture_worker(int camera_id) {
 }
 
 void RGBDPanoramaNode::process_frames() {
-    // Check if all cameras have frames
-    for (int i = 0; i < 4; i++) {
-        std::lock_guard<std::mutex> lock(*buffer_mutexes_[i]);
-        if (frame_buffers_[i].empty()) {
-            return;  // Wait for all cameras to have frames
-        }
-    }
-    
     frame_count_++;
     auto start_time = std::chrono::high_resolution_clock::now();
     
     RCLCPP_INFO(this->get_logger(), "Processing frame %d", frame_count_);
     
     try {
-        // Get latest frames from all cameras
+        // Get frames based on mode
         std::vector<cv::Mat> frames(4);
-        for (int i = 0; i < 4; i++) {
-            std::lock_guard<std::mutex> lock(*buffer_mutexes_[i]);
-            frames[i] = frame_buffers_[i].back().clone();
+        
+        if (use_test_images_) {
+            // Use static test images
+            RCLCPP_INFO(this->get_logger(), "Using test images");
+            for (int i = 0; i < 4; i++) {
+                frames[i] = test_images_[i].clone();
+                RCLCPP_INFO(this->get_logger(), "  Frame %d: %dx%d, channels=%d, type=%d",
+                           i, frames[i].cols, frames[i].rows, frames[i].channels(), frames[i].type());
+            }
+        } else {
+            // Check if all cameras have frames
+            for (int i = 0; i < 4; i++) {
+                std::lock_guard<std::mutex> lock(*buffer_mutexes_[i]);
+                if (frame_buffers_[i].empty()) {
+                    return;  // Wait for all cameras to have frames
+                }
+            }
+            
+            // Get latest frames from all cameras
+            for (int i = 0; i < 4; i++) {
+                std::lock_guard<std::mutex> lock(*buffer_mutexes_[i]);
+                frames[i] = frame_buffers_[i].back().clone();
+            }
         }
         
         // Preprocess images for matching
+        RCLCPP_INFO(this->get_logger(), "Preprocessing images for matching...");
         std::vector<std::vector<float>> images_to_match;
         for (int i = 0; i < 4; i++) {
+            RCLCPP_INFO(this->get_logger(), "  Processing camera %d for matching", i);
             images_to_match.push_back(preprocess_image_to_match(frames[i]));
         }
         
         // Preprocess images for stitching (only reference cameras)
+        RCLCPP_INFO(this->get_logger(), "Preprocessing images for stitching...");
         std::vector<std::vector<float>> images_to_stitch;
         for (auto ref_idx : references_indices_) {
+            RCLCPP_INFO(this->get_logger(), "  Processing camera %ld for stitching", ref_idx);
             images_to_stitch.push_back(preprocess_image_to_stitch(frames[ref_idx]));
         }
 
         // Estimate RGBD panorama
+        RCLCPP_INFO(this->get_logger(), "Calling estimate_RGBD_panorama...");
         auto [rgb_panorama, distance_panorama] = 
             rgbd_estimator_->estimate_RGBD_panorama(images_to_match, images_to_stitch);
         
@@ -430,6 +503,12 @@ void RGBDPanoramaNode::process_frames() {
 
         RCLCPP_INFO(this->get_logger(), "Frame %d processed in %ld ms (%.2f FPS)",
                     frame_count_, duration, 1000.0 / duration);
+        
+        // If using test images, process only once and stop timer
+        if (use_test_images_) {
+            RCLCPP_INFO(this->get_logger(), "Test image processing complete. Node will continue running for topic inspection.");
+            timer_->cancel();
+        }
 
     } catch (const std::exception& e) {
         RCLCPP_ERROR(this->get_logger(), "Error processing frame %d: %s",
@@ -438,12 +517,21 @@ void RGBDPanoramaNode::process_frames() {
 }
 
 std::vector<float> RGBDPanoramaNode::preprocess_image_to_match(const cv::Mat& img) {
+    RCLCPP_INFO(this->get_logger(), "    Input: %dx%d, type=%d, continuous=%d",
+               img.cols, img.rows, img.type(), img.isContinuous());
+    
+    // Ensure input is continuous
+    cv::Mat input = img.isContinuous() ? img : img.clone();
+    
     // Resize to matching resolution
     cv::Mat resized;
-    cv::resize(img, resized, 
+    RCLCPP_INFO(this->get_logger(), "    Resizing to %ldx%ld...",
+               matching_resolution_[0], matching_resolution_[1]);
+    cv::resize(input, resized, 
                cv::Size(static_cast<int>(matching_resolution_[0]),
                        static_cast<int>(matching_resolution_[1])),
                0, 0, cv::INTER_AREA);
+    RCLCPP_INFO(this->get_logger(), "    Resize complete");
 
     // Convert BGR to RGB and to float [0, 255]
     cv::Mat rgb;

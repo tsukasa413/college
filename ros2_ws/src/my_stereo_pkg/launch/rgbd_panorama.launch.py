@@ -13,6 +13,9 @@ def generate_launch_description():
     pkg_share = get_package_share_directory('my_stereo_pkg')
     default_calib_path = os.path.join(pkg_share, 'config', 'calibration.json')
     
+    # Test images directory (sphere-stereo resources)
+    test_images_dir = '/home/motoken/college/sphere-stereo/resources'
+    
     return LaunchDescription([
         Node(
             package='my_stereo_pkg',
@@ -45,6 +48,13 @@ def generate_launch_description():
                 
                 # CUDA device ID
                 'device_id': 0,
+                
+                # Test mode: set to True for static images, False for live camera
+                'use_test_images': True,  # Set to False to use live cameras
+                'test_images_dir': test_images_dir,
+                
+                # Processing FPS
+                'fps': 1.0,  # Slower FPS for test mode (1 FPS)
             }],
             # Remap topics to match quad_cam_system
             remappings=[

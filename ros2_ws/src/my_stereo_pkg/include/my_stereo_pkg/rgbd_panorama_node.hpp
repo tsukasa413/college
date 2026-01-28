@@ -56,6 +56,11 @@ private:
     void initialize_cameras();
 
     /**
+     * @brief Load test images from directory
+     */
+    void load_test_images();
+
+    /**
      * @brief Camera capture worker thread
      */
     void capture_worker(int camera_id);
@@ -106,6 +111,8 @@ private:
     std::vector<int64_t> panorama_resolution_;
     std::vector<int64_t> original_resolution_;
     int device_id_;
+    bool use_test_images_;
+    std::string test_images_dir_;
 
     // Camera capture (direct access)
     std::vector<cv::VideoCapture> cameras_;
@@ -114,6 +121,9 @@ private:
     std::vector<std::unique_ptr<std::mutex>> buffer_mutexes_;
     bool running_;
     double fps_;
+
+    // Test images (static input)
+    std::vector<cv::Mat> test_images_;
 
     // Timer for processing
     rclcpp::TimerBase::SharedPtr timer_;
