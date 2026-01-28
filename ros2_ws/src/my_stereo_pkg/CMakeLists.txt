@@ -19,10 +19,12 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
-# ROS2 packages
+# ROS2 packages (without cv_bridge yet - will be added after OpenCV)
 find_package(ament_cmake REQUIRED)
 find_package(ament_cmake_python REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(message_filters REQUIRED)
 
 # Find required packages
 find_package(CUDA REQUIRED)
@@ -36,7 +38,12 @@ set(OpenCV_LIBRARIES
     /usr/lib/aarch64-linux-gnu/libopencv_highgui.so.4.5.4d
     /usr/lib/aarch64-linux-gnu/libopencv_calib3d.so.4.5.4d
     /usr/lib/aarch64-linux-gnu/libopencv_features2d.so.4.5.4d
+    /usr/lib/aarch64-linux-gnu/libopencv_videoio.so.4.5.4d
 )
+
+# cv_bridge has OpenCV version conflict, skip it for now
+# We'll implement manual ROS Image <-> cv::Mat conversion
+# find_package(cv_bridge REQUIRED)
 
 # LibTorch for ISB Filter and Stitcher
 execute_process(
@@ -296,96 +303,143 @@ endif()
 # StereoEngine Integration Module
 # ============================================================================
 
-# Try to find jsoncpp
-find_library(JSONCPP_LIBRARY jsoncpp)
-find_path(JSONCPP_INCLUDE_DIR jsoncpp/json/json.h)
+# ============================================================================
+# StereoEngine Integration Module (DISABLED - files not present)
+# ============================================================================
 
-if(JSONCPP_LIBRARY AND JSONCPP_INCLUDE_DIR)
-    message(STATUS "jsoncpp found, building StereoEngine")
-    message(STATUS "  Library: ${JSONCPP_LIBRARY}")
-    message(STATUS "  Include: ${JSONCPP_INCLUDE_DIR}")
-    
-    # StereoEngine library
-    cuda_add_library(stereo_engine SHARED
-        src/core/stereo_engine.cpp
-        src/cuda/stereo_engine_kernels.cu
-    )
-    
-    target_include_directories(stereo_engine PUBLIC
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-        $<INSTALL_INTERFACE:include>
-        ${JSONCPP_INCLUDE_DIR}
-        /usr/include/opencv4
-    )
-    
-    target_link_libraries(stereo_engine
-        ${CUDA_LIBRARIES}
-        ${TORCH_LIBRARIES}
-        ${OpenCV_LIBRARIES}
-        sphere_stereo_utils
-        ${JSONCPP_LIBRARY}
-    )
-    
-    # Python bindings for StereoEngine
-    if(pybind11_FOUND)
-        pybind11_add_module(stereo_engine_cuda
-            src/stereo_engine_bindings.cpp
-        )
-        
-        target_link_libraries(stereo_engine_cuda PRIVATE
-            stereo_engine
-        )
-        
-        # Install to Python dist-packages
-        install(TARGETS stereo_engine_cuda
-            LIBRARY DESTINATION lib/python${Python3_VERSION_MAJOR}.${Python3_VERSION_MINOR}/site-packages
-        )
-        
-        message(STATUS "StereoEngine Python bindings will be built")
-    endif()
-    
-    # Install StereoEngine library
-    install(TARGETS stereo_engine
-        EXPORT export_${PROJECT_NAME}
-        LIBRARY DESTINATION lib
-        ARCHIVE DESTINATION lib
-        RUNTIME DESTINATION bin
-        INCLUDES DESTINATION include
-    )
-    
-    # ========================================================================
-    # Standalone C++ Evaluator (Performance Benchmark)
-    # ========================================================================
-    message(STATUS "Building standalone evaluator...")
-    
-    add_executable(standalone_eval
-        src/apps/standalone_eval.cpp
-    )
-    
-    target_include_directories(standalone_eval PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
-        /usr/include/opencv4
-        ${JSONCPP_INCLUDE_DIR}
-    )
-    
-    target_link_libraries(standalone_eval
-        stereo_engine
-        ${OpenCV_LIBRARIES}
-        ${JSONCPP_LIBRARY}
-        stdc++fs  # For std::filesystem
-    )
-    
-    # Install standalone evaluator
-    install(TARGETS standalone_eval
-        RUNTIME DESTINATION lib/${PROJECT_NAME}
-    )
-    
-    message(STATUS "  standalone_eval executable will be built")
-    
-else()
-    message(WARNING "jsoncpp not found, skipping StereoEngine module")
-    message(WARNING "  Install with: sudo apt-get install libjsoncpp-dev")
-endif()
+# # Try to find jsoncpp
+# find_library(JSONCPP_LIBRARY jsoncpp)
+# find_path(JSONCPP_INCLUDE_DIR jsoncpp/json/json.h)
+# 
+# if(JSONCPP_LIBRARY AND JSONCPP_INCLUDE_DIR)
+#     message(STATUS "jsoncpp found, building StereoEngine")
+#     message(STATUS "  Library: ${JSONCPP_LIBRARY}")
+#     message(STATUS "  Include: ${JSONCPP_INCLUDE_DIR}")
+#     
+#     # StereoEngine library
+#     cuda_add_library(stereo_engine SHARED
+#         src/core/stereo_engine.cpp
+#         src/cuda/stereo_engine_kernels.cu
+#     )
+#     
+#     target_include_directories(stereo_engine PUBLIC
+#         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+#         $<INSTALL_INTERFACE:include>
+#         ${JSONCPP_INCLUDE_DIR}
+#         /usr/include/opencv4
+#     )
+#     
+#     target_link_libraries(stereo_engine
+#         ${CUDA_LIBRARIES}
+#         ${TORCH_LIBRARIES}
+#         ${OpenCV_LIBRARIES}
+#         sphere_stereo_utils
+#         ${JSONCPP_LIBRARY}
+#     )
+#     
+#     # Python bindings for StereoEngine
+#     if(pybind11_FOUND)
+#         pybind11_add_module(stereo_engine_cuda
+#             src/stereo_engine_bindings.cpp
+#         )
+#         
+#         target_link_libraries(stereo_engine_cuda PRIVATE
+#             stereo_engine
+#         )
+#         
+#         # Install to Python dist-packages
+#         install(TARGETS stereo_engine_cuda
+#             LIBRARY DESTINATION lib/python${Python3_VERSION_MAJOR}.${Python3_VERSION_MINOR}/site-packages
+#         )
+#         
+#         message(STATUS "StereoEngine Python bindings will be built")
+#     endif()
+#     
+#     # Install StereoEngine library
+#     install(TARGETS stereo_engine
+#         EXPORT export_${PROJECT_NAME}
+#         LIBRARY DESTINATION lib
+#         ARCHIVE DESTINATION lib
+#         RUNTIME DESTINATION bin
+#         INCLUDES DESTINATION include
+#     )
+#     
+#     # ========================================================================
+#     # Standalone C++ Evaluator (Performance Benchmark)
+#     # ========================================================================
+#     message(STATUS "Building standalone evaluator...")
+#     
+#     add_executable(standalone_eval
+#         src/apps/standalone_eval.cpp
+#     )
+#     
+#     target_include_directories(standalone_eval PRIVATE
+#         ${CMAKE_CURRENT_SOURCE_DIR}/include
+#         /usr/include/opencv4
+#         ${JSONCPP_INCLUDE_DIR}
+#     )
+#     
+#     target_link_libraries(standalone_eval
+#         stereo_engine
+#         ${OpenCV_LIBRARIES}
+#         ${JSONCPP_LIBRARY}
+#         stdc++fs  # For std::filesystem
+#     )
+#     
+#     # Install standalone evaluator
+#     install(TARGETS standalone_eval
+#         RUNTIME DESTINATION lib/${PROJECT_NAME}
+#     )
+#     
+#     message(STATUS "  standalone_eval executable will be built")
+#     
+# else()
+#     message(WARNING "jsoncpp not found, skipping StereoEngine module")
+#     message(WARNING "  Install with: sudo apt-get install libjsoncpp-dev")
+# endif()
+
+# ============================================================================
+# ROS2 RGBD Panorama Node
+# ============================================================================
+
+message(STATUS "Building RGBD Panorama ROS2 Node...")
+
+add_executable(rgbd_panorama_node
+    src/core/rgbd_panorama_node.cpp
+)
+
+target_include_directories(rgbd_panorama_node PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    /usr/include/opencv4
+)
+
+target_link_libraries(rgbd_panorama_node
+    sphere_stereo_utils
+    ${OpenCV_LIBRARIES}
+    ${TORCH_LIBRARIES}
+)
+
+ament_target_dependencies(rgbd_panorama_node
+    rclcpp
+    sensor_msgs
+)
+
+install(TARGETS rgbd_panorama_node
+    RUNTIME DESTINATION lib/${PROJECT_NAME}
+)
+
+# Install launch files
+install(DIRECTORY launch/
+    DESTINATION share/${PROJECT_NAME}/launch
+)
+
+# Install config files
+install(DIRECTORY config/
+    DESTINATION share/${PROJECT_NAME}/config
+    OPTIONAL
+)
+
+message(STATUS "  rgbd_panorama_node will be built")
 
 # ============================================================================
 # ROS2 Export

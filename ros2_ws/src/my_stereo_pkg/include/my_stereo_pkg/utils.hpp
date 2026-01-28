@@ -18,24 +18,29 @@ Sphere Sweeping Stereo Preprocessing
 namespace sphere_stereo {
 
 // ============================================================================
-// Double Sphere Camera Model Structures
+// POD Calibration Structures for Unified Memory (Zero-Copy)
 // ============================================================================
 
-struct Intrinsics {
+/**
+ * Plain Old Data (POD) camera calibration structure
+ * Compatible with Unified Memory - no pointers, no virtual functions
+ * Can be directly accessed from both CPU and GPU without cudaMemcpy
+ */
+struct CameraCalibration {
+    // Intrinsics (Double Sphere model)
     float fx, fy, cx, cy;
     float xi, alpha;
-};
-
-struct CameraExtrinsics {
-    float rotation[3][3];
-    float translation[3];
-};
-
-struct CameraCalibration {
-    Intrinsics intrinsics;
-    CameraExtrinsics extrinsics;
+    
+    // Extrinsics: 4x4 transformation matrix (row-major)
+    // [R00 R01 R02 tx]
+    // [R10 R11 R12 ty]
+    // [R20 R21 R22 tz]
+    // [0   0   0   1 ]
+    float rt[16];
+    
+    // Resolution and scaling
     float matching_scale;
-    int resolution_x, resolution_y;
+    int width, height;
 };
 
 // ============================================================================
@@ -51,43 +56,82 @@ struct CameraCalibration {
     } while(0)
 
 // ============================================================================
-// Host-side Calibration Wrapper
+// Unified Memory Calibration Wrapper (Zero-Copy)
 // ============================================================================
 
 /**
- * Encapsulates camera calibration and provides GPU memory management
+ * Unified Memory wrapper for camera calibration
+ * Uses cudaMallocManaged for zero-copy access from both CPU and GPU
+ * No cudaMemcpy required!
  */
 class CameraCalibrationGPU {
 public:
-    CameraCalibrationGPU() : d_calib_(nullptr) {}
+    CameraCalibrationGPU() : managed_calib_(nullptr) {}
     
+    // Destructor: Free Unified Memory only if owned
     ~CameraCalibrationGPU() {
-        if (d_calib_) {
-            cudaFree(d_calib_);
+        if (managed_calib_) {
+            cudaFree(managed_calib_);
+            managed_calib_ = nullptr;
         }
     }
     
-    /**
-     * Initialize from host calibration structure
-     */
-    void initialize_from_host(
-        const CameraCalibration& h_calib
-    );
+    // Delete copy constructor and copy assignment (prevent double-free)
+    CameraCalibrationGPU(const CameraCalibrationGPU&) = delete;
+    CameraCalibrationGPU& operator=(const CameraCalibrationGPU&) = delete;
     
-    /**
-     * Get device pointer for kernel calls
-     */
-    CameraCalibration* get_device_ptr() const {
-        return d_calib_;
+    // Move constructor: Transfer ownership
+    CameraCalibrationGPU(CameraCalibrationGPU&& other) noexcept 
+        : managed_calib_(other.managed_calib_) {
+        other.managed_calib_ = nullptr;  // Critical: prevent double-free
+    }
+    
+    // Move assignment: Transfer ownership
+    CameraCalibrationGPU& operator=(CameraCalibrationGPU&& other) noexcept {
+        if (this != &other) {
+            // Free existing resource
+            if (managed_calib_) {
+                cudaFree(managed_calib_);
+            }
+            // Transfer ownership
+            managed_calib_ = other.managed_calib_;
+            other.managed_calib_ = nullptr;  // Critical: prevent double-free
+        }
+        return *this;
     }
     
     /**
-     * Get CPU copy of calibration
+     * Initialize using Unified Memory (cudaMallocManaged)
+     * Accessible from both CPU and GPU without explicit copy
      */
-    CameraCalibration get_host_copy() const;
+    void initialize_unified(
+        float fx, float fy, float cx, float cy,
+        float xi, float alpha,
+        const float rt_matrix[16],
+        float matching_scale,
+        int width, int height
+    );
+    
+    /**
+     * Get unified memory pointer (accessible from both CPU and GPU)
+     */
+    CameraCalibration* get_unified_ptr() const {
+        return managed_calib_;
+    }
+    
+    /**
+     * Get CPU reference (no copy needed with Unified Memory)
+     */
+    CameraCalibration& get_host_ref() {
+        return *managed_calib_;
+    }
+    
+    const CameraCalibration& get_host_ref() const {
+        return *managed_calib_;
+    }
     
 private:
-    CameraCalibration* d_calib_;  // Device pointer
+    CameraCalibration* managed_calib_;  // Unified Memory pointer
 };
 
 // ============================================================================
@@ -174,11 +218,6 @@ public:
 private:
     size_t width_, height_, channels_, size_;
     T* ptr_;
-    
-    #define CUDA_CHECK(call) \
-        if ((call) != cudaSuccess) { \
-            throw std::runtime_error("CUDA error"); \
-        }
 };
 
 // ============================================================================
@@ -198,6 +237,16 @@ public:
         const std::string& json_path,
         const std::vector<int>& matching_resolution,
         const std::vector<int>& original_resolution = {}
+    );
+    
+    /**
+     * Parse Basalt camera from extrinsics and intrinsics JSON
+     */
+    static CameraCalibrationGPU parse_basalt_camera(
+        const nlohmann::json& extrinsics_json,
+        const nlohmann::json& intrinsics_json,
+        const std::vector<int>& original_resolution,
+        const std::vector<int>& matching_resolution
     );
     
     /**

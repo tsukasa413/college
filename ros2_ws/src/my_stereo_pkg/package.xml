@@ -14,7 +14,7 @@
   <!-- ROS 2 dependencies -->
   <depend>rclcpp</depend>
   <depend>sensor_msgs</depend>
-  <depend>cv_bridge</depend>
+  <depend>message_filters</depend>
 
   <!-- System dependencies (handled by find_package in CMakeLists.txt) -->
   <!-- torch: PyTorch C++ API -->

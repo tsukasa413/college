@@ -100,11 +100,14 @@ RGBD_Estimator::RGBD_Estimator(
       sigma_i_(sigma_i),
       sigma_s_(sigma_s)
 {
+    std::cout << "[RGBD_Estimator] Constructor starting..." << std::endl;
     CUDA_CHECK(cudaSetDevice(device_id_));
+    std::cout << "[RGBD_Estimator] CUDA device set to " << device_id_ << std::endl;
     
     // ========================================================================
     // Initialize Configuration
     // ========================================================================
+    std::cout << "[RGBD_Estimator] Initializing configuration..." << std::endl;
     
     config_.num_cameras = num_cameras_;
     config_.matching_width = matching_width;
@@ -114,10 +117,13 @@ RGBD_Estimator::RGBD_Estimator(
     config_.candidate_count = candidate_count;
     
     matching_pixels_ = matching_width * matching_height;
+    std::cout << "[RGBD_Estimator] Configuration: " << num_cameras_ << " cameras, " 
+              << matching_width << "x" << matching_height << " resolution" << std::endl;
     
     // ========================================================================
     // Build Calibration Structures
     // ========================================================================
+    std::cout << "[RGBD_Estimator] Building calibration structures..." << std::endl;
     
     calibrations_.resize(num_cameras_);
     for (int i = 0; i < num_cameras_; i++) {
@@ -161,12 +167,15 @@ RGBD_Estimator::RGBD_Estimator(
         
         calib.padding = 0;
     }
+    std::cout << "[RGBD_Estimator] Calibration structures built" << std::endl;
     
     // ========================================================================
     // Allocate GPU Memory
     // ========================================================================
+    std::cout << "[RGBD_Estimator] Allocating GPU memory..." << std::endl;
     
     allocate_gpu_memory();
+    std::cout << "[RGBD_Estimator] GPU memory allocated" << std::endl;
     
     // ========================================================================
     // Pre-compute Relative RT Matrices (avoid runtime computation)

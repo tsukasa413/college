@@ -14,36 +14,43 @@ Sphere Sweeping Stereo Preprocessing
 namespace sphere_stereo {
 
 // ============================================================================
-// CameraCalibrationGPU Implementation
+// CameraCalibrationGPU Implementation - Unified Memory (Zero-Copy)
 // ============================================================================
 
-void CameraCalibrationGPU::initialize_from_host(
-    const CameraCalibration& h_calib
+void CameraCalibrationGPU::initialize_unified(
+    float fx, float fy, float cx, float cy,
+    float xi, float alpha,
+    const float rt_matrix[16],
+    float matching_scale,
+    int width, int height
 ) {
-    if (d_calib_) {
-        cudaFree(d_calib_);
+    if (managed_calib_) {
+        cudaFree(managed_calib_);
     }
     
-    CUDA_CHECK(cudaMalloc((void**)&d_calib_, sizeof(CameraCalibration)));
-    CUDA_CHECK(cudaMemcpy(d_calib_, &h_calib, sizeof(CameraCalibration),
-                          cudaMemcpyHostToDevice));
-}
-
-CameraCalibration CameraCalibrationGPU::get_host_copy() const {
-    if (!d_calib_) {
-        std::cerr << "[CameraCalibrationGPU] Error: d_calib_ is nullptr!" << std::endl;
-        throw std::runtime_error("CameraCalibrationGPU not initialized (d_calib_ is null)");
+    // Allocate Unified Memory (accessible from both CPU and GPU)
+    CUDA_CHECK(cudaMallocManaged((void**)&managed_calib_, sizeof(CameraCalibration)));
+    
+    // Initialize directly in Unified Memory (no cudaMemcpy needed!)
+    managed_calib_->fx = fx;
+    managed_calib_->fy = fy;
+    managed_calib_->cx = cx;
+    managed_calib_->cy = cy;
+    managed_calib_->xi = xi;
+    managed_calib_->alpha = alpha;
+    managed_calib_->matching_scale = matching_scale;
+    managed_calib_->width = width;
+    managed_calib_->height = height;
+    
+    // Copy RT matrix
+    for (int i = 0; i < 16; i++) {
+        managed_calib_->rt[i] = rt_matrix[i];
     }
     
-    CameraCalibration h_calib;
-    cudaError_t err = cudaMemcpy(&h_calib, d_calib_, sizeof(CameraCalibration),
-                                 cudaMemcpyDeviceToHost);
-    if (err != cudaSuccess) {
-        std::cerr << "[CameraCalibrationGPU] cudaMemcpy failed: " << cudaGetErrorString(err) << std::endl;
-        throw std::runtime_error("CUDA error: " + std::string(cudaGetErrorString(err)));
-    }
-    
-    return h_calib;
+    // Prefetch to GPU for better performance (optional on Jetson)
+    int device = 0;
+    cudaGetDevice(&device);
+    cudaMemPrefetchAsync(managed_calib_, sizeof(CameraCalibration), device, 0);
 }
 
 // ============================================================================
@@ -122,8 +129,6 @@ CameraCalibrationGPU CalibrationParser::parse_basalt_camera(
     const std::vector<int>& original_resolution,
     const std::vector<int>& matching_resolution
 ) {
-    CameraCalibration h_calib;
-    
     // Check camera type
     std::string camera_type = intrinsics_json["camera_type"].get<std::string>();
     if (camera_type != "ds") {
@@ -132,16 +137,12 @@ CameraCalibrationGPU CalibrationParser::parse_basalt_camera(
     
     // Parse intrinsics
     auto cam_intrinsics = intrinsics_json["intrinsics"];
-    h_calib.intrinsics.fx = cam_intrinsics["fx"].get<float>();
-    h_calib.intrinsics.fy = cam_intrinsics["fy"].get<float>();
-    h_calib.intrinsics.cx = cam_intrinsics["cx"].get<float>();
-    h_calib.intrinsics.cy = cam_intrinsics["cy"].get<float>();
-    h_calib.intrinsics.xi = cam_intrinsics["xi"].get<float>();
-    h_calib.intrinsics.alpha = cam_intrinsics["alpha"].get<float>();
-    
-    // Parse resolution
-    h_calib.resolution_x = original_resolution[0];
-    h_calib.resolution_y = original_resolution[1];
+    float fx = cam_intrinsics["fx"].get<float>();
+    float fy = cam_intrinsics["fy"].get<float>();
+    float cx = cam_intrinsics["cx"].get<float>();
+    float cy = cam_intrinsics["cy"].get<float>();
+    float xi = cam_intrinsics["xi"].get<float>();
+    float alpha = cam_intrinsics["alpha"].get<float>();
     
     // Parse extrinsics (quaternion + translation)
     float qx = extrinsics_json["qx"].get<float>();
@@ -165,37 +166,51 @@ CameraCalibrationGPU CalibrationParser::parse_basalt_camera(
     float wy = qw * qy;
     float wz = qw * qz;
     
-    h_calib.extrinsics.rotation[0][0] = 1.0f - 2.0f * (y2 + z2);
-    h_calib.extrinsics.rotation[0][1] = 2.0f * (xy - wz);
-    h_calib.extrinsics.rotation[0][2] = 2.0f * (xz + wy);
+    // Build 4x4 RT matrix (row-major)
+    float rt_matrix[16];
+    rt_matrix[0] = 1.0f - 2.0f * (y2 + z2);
+    rt_matrix[1] = 2.0f * (xy - wz);
+    rt_matrix[2] = 2.0f * (xz + wy);
+    rt_matrix[3] = px;
     
-    h_calib.extrinsics.rotation[1][0] = 2.0f * (xy + wz);
-    h_calib.extrinsics.rotation[1][1] = 1.0f - 2.0f * (x2 + z2);
-    h_calib.extrinsics.rotation[1][2] = 2.0f * (yz - wx);
+    rt_matrix[4] = 2.0f * (xy + wz);
+    rt_matrix[5] = 1.0f - 2.0f * (x2 + z2);
+    rt_matrix[6] = 2.0f * (yz - wx);
+    rt_matrix[7] = py;
     
-    h_calib.extrinsics.rotation[2][0] = 2.0f * (xz - wy);
-    h_calib.extrinsics.rotation[2][1] = 2.0f * (yz + wx);
-    h_calib.extrinsics.rotation[2][2] = 1.0f - 2.0f * (x2 + y2);
+    rt_matrix[8] = 2.0f * (xz - wy);
+    rt_matrix[9] = 2.0f * (yz + wx);
+    rt_matrix[10] = 1.0f - 2.0f * (x2 + y2);
+    rt_matrix[11] = pz;
     
-    h_calib.extrinsics.translation[0] = px;
-    h_calib.extrinsics.translation[1] = py;
-    h_calib.extrinsics.translation[2] = pz;
+    rt_matrix[12] = 0.0f;
+    rt_matrix[13] = 0.0f;
+    rt_matrix[14] = 0.0f;
+    rt_matrix[15] = 1.0f;
     
     // Compute matching resolution scale
-    h_calib.matching_scale = 
+    float matching_scale = 
         static_cast<float>(matching_resolution[0]) / 
         static_cast<float>(original_resolution[0]);
     
-    std::cout << "[CalibrationParser] Creating CameraCalibrationGPU..." << std::endl;
-    std::cout << "  Intrinsics: fx=" << h_calib.intrinsics.fx << ", fy=" << h_calib.intrinsics.fy << std::endl;
-    std::cout << "  Translation: [" << h_calib.extrinsics.translation[0] << ", " 
-              << h_calib.extrinsics.translation[1] << ", " 
-              << h_calib.extrinsics.translation[2] << "]" << std::endl;
+    std::cout << "[CalibrationParser] Creating CameraCalibrationGPU with Unified Memory..." << std::endl;
+    std::cout << "  Intrinsics: fx=" << fx << ", fy=" << fy << std::endl;
+    std::cout << "  Translation: [" << px << ", " << py << ", " << pz << "]" << std::endl;
     
+    // Create GPU calibration object and initialize with Unified Memory
     CameraCalibrationGPU calib_gpu;
-    calib_gpu.initialize_from_host(h_calib);
+    calib_gpu.initialize_unified(
+        fx, fy, cx, cy, xi, alpha,
+        rt_matrix,
+        matching_scale,
+        original_resolution[0], original_resolution[1]
+    );
     
-    std::cout << "[CalibrationParser] CameraCalibrationGPU initialized successfully" << std::endl;
+    // CRITICAL: Synchronize to ensure Unified Memory is ready for CPU access
+    CUDA_CHECK(cudaDeviceSynchronize());
+    
+    std::cout << "[CalibrationParser] CameraCalibrationGPU initialized successfully with Unified Memory" << std::endl;
+    std::cout << "  Unified Memory address: " << calib_gpu.get_unified_ptr() << std::endl;
     
     return calib_gpu;
 }
@@ -205,55 +220,63 @@ CameraCalibrationGPU CalibrationParser::parse_camera_json(
     const std::vector<int>& matching_resolution,
     const std::vector<int>& original_resolution
 ) {
-    CameraCalibration h_calib;
-    
     // Parse intrinsics
     auto calib_arr = cam_json["intrinsics"].get<std::vector<double>>();
-    h_calib.intrinsics.fx = calib_arr[0];
-    h_calib.intrinsics.fy = calib_arr[1];
-    h_calib.intrinsics.cx = calib_arr[2];
-    h_calib.intrinsics.cy = calib_arr[3];
+    float fx = calib_arr[0];
+    float fy = calib_arr[1];
+    float cx = calib_arr[2];
+    float cy = calib_arr[3];
     
     // Parse distortion parameters
+    float xi = 0.0f, alpha = 0.5f;
     if (cam_json.contains("distortion_coeffs")) {
         auto dist_arr = cam_json["distortion_coeffs"].get<std::vector<double>>();
-        h_calib.intrinsics.xi = dist_arr[0];
-        h_calib.intrinsics.alpha = dist_arr.size() > 1 ? dist_arr[1] : 0.5f;
+        xi = dist_arr[0];
+        alpha = dist_arr.size() > 1 ? dist_arr[1] : 0.5f;
     }
     
     // Parse resolution
+    int width = original_resolution[0];
+    int height = original_resolution[1];
     if (cam_json.contains("resolution")) {
         auto res_arr = cam_json["resolution"].get<std::vector<int>>();
-        h_calib.resolution_x = res_arr[0];
-        h_calib.resolution_y = res_arr[1];
+        width = res_arr[0];
+        height = res_arr[1];
     }
     
-    // Parse camera extrinsics
+    // Build RT matrix from extrinsics
+    float rt_matrix[16] = {
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0,
+        0, 0, 0, 1
+    };
+    
     if (cam_json.contains("T_cn_cnm1")) {
         auto T_arr = cam_json["T_cn_cnm1"].get<std::vector<std::vector<double>>>();
         
         for (int i = 0; i < 3; ++i) {
-            for (int j = 0; j < 3; ++j) {
-                h_calib.extrinsics.rotation[i][j] = T_arr[i][j];
+            for (int j = 0; j < 4; ++j) {
+                rt_matrix[i * 4 + j] = T_arr[i][j];
             }
-        }
-        
-        for (int i = 0; i < 3; ++i) {
-            h_calib.extrinsics.translation[i] = T_arr[i][3];
         }
     }
     
     // Compute matching resolution scale
-    if (!matching_resolution.empty() && !original_resolution.empty()) {
-        h_calib.matching_scale = 
-            static_cast<float>(matching_resolution[0]) / 
-            static_cast<float>(original_resolution[0]);
-    } else {
-        h_calib.matching_scale = 1.0f;
-    }
+    float matching_scale = (!matching_resolution.empty() && !original_resolution.empty()) ? 
+        static_cast<float>(matching_resolution[0]) / static_cast<float>(original_resolution[0]) : 1.0f;
     
+    // Create GPU calibration object and initialize with Unified Memory
     CameraCalibrationGPU calib_gpu;
-    calib_gpu.initialize_from_host(h_calib);
+    calib_gpu.initialize_unified(
+        fx, fy, cx, cy, xi, alpha,
+        rt_matrix,
+        matching_scale,
+        width, height
+    );
+    
+    // CRITICAL: Synchronize to ensure Unified Memory is ready for CPU access
+    CUDA_CHECK(cudaDeviceSynchronize());
     
     return calib_gpu;
 }
@@ -285,7 +308,7 @@ void unproject_gpu(
     
     launch_unproject_kernel(
         d_uv,
-        calib.get_device_ptr(),
+        calib.get_unified_ptr(),
         d_points,
         d_valid,
         width, height
@@ -334,7 +357,7 @@ void project_gpu(
     
     launch_project_kernel(
         d_points,
-        calib.get_device_ptr(),
+        calib.get_unified_ptr(),
         d_uv,
         d_valid,
         width, height

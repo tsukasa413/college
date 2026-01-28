@@ -1,0 +1,77 @@
+Starting >>> my_stereo_pkg
+--- stderr: my_stereo_pkg
+CMake Warning (dev) at CMakeLists.txt:31 (find_package):
+  Policy CMP0146 is not set: The FindCUDA module is removed.  Run "cmake
+  --help-policy CMP0146" for policy details.  Use the cmake_policy command to
+  set the policy and suppress this warning.
+
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+CMake Warning at /home/motoken/.local/lib/python3.10/site-packages/torch/share/cmake/Torch/TorchConfig.cmake:22 (message):
+  static library kineto_LIBRARY-NOTFOUND not found.
+Call Stack (most recent call first):
+  /home/motoken/.local/lib/python3.10/site-packages/torch/share/cmake/Torch/TorchConfig.cmake:127 (append_torchlib_if_found)
+  CMakeLists.txt:51 (find_package)
+
+
+CMake Error at /home/motoken/.local/lib/python3.10/site-packages/torch/share/cmake/Caffe2/Modules_CUDA_fix/upstream/FindCUDA.cmake:1795 (add_library):
+  Cannot find source file:
+
+    src/core/stereo_engine.cpp
+
+  Tried extensions .c .C .c++ .cc .cpp .cxx .cu .mpp .m .M .mm .ixx .cppm
+  .ccm .cxxm .c++m .h .hh .h++ .hm .hpp .hxx .in .txx .f .F .for .f77 .f90
+  .f95 .f03 .hip .ispc
+Call Stack (most recent call first):
+  CMakeLists.txt:312 (cuda_add_library)
+
+
+CMake Error at /usr/share/cmake-4.2/Modules/FindPython/Support.cmake:4439 (add_library):
+  Cannot find source file:
+
+    src/stereo_engine_bindings.cpp
+
+  Tried extensions .c .C .c++ .cc .cpp .cxx .cu .mpp .m .M .mm .ixx .cppm
+  .ccm .cxxm .c++m .h .hh .h++ .hm .hpp .hxx .in .txx .f .F .for .f77 .f90
+  .f95 .f03 .hip .ispc
+Call Stack (most recent call first):
+  /usr/share/cmake-4.2/Modules/FindPython3.cmake:674:EVAL:2 (__Python3_add_library)
+  /home/motoken/.local/share/cmake/pybind11/pybind11NewTools.cmake:285 (python3_add_library)
+  CMakeLists.txt:334 (pybind11_add_module)
+
+
+CMake Error at CMakeLists.txt:364 (add_executable):
+  Cannot find source file:
+
+    src/apps/standalone_eval.cpp
+
+  Tried extensions .c .C .c++ .cc .cpp .cxx .cu .mpp .m .M .mm .ixx .cppm
+  .ccm .cxxm .c++m .h .hh .h++ .hm .hpp .hxx .in .txx .f .F .for .f77 .f90
+  .f95 .f03 .hip .ispc
+
+
+CMake Error at /home/motoken/.local/lib/python3.10/site-packages/torch/share/cmake/Caffe2/Modules_CUDA_fix/upstream/FindCUDA.cmake:1795 (add_library):
+  No SOURCES given to target: stereo_engine
+Call Stack (most recent call first):
+  CMakeLists.txt:312 (cuda_add_library)
+
+
+CMake Error at /usr/share/cmake-4.2/Modules/FindPython/Support.cmake:4439 (add_library):
+  No SOURCES given to target: stereo_engine_cuda
+Call Stack (most recent call first):
+  /usr/share/cmake-4.2/Modules/FindPython3.cmake:674:EVAL:2 (__Python3_add_library)
+  /home/motoken/.local/share/cmake/pybind11/pybind11NewTools.cmake:285 (python3_add_library)
+  CMakeLists.txt:334 (pybind11_add_module)
+
+
+CMake Error at CMakeLists.txt:364 (add_executable):
+  No SOURCES given to target: standalone_eval
+
+
+CMake Generate step failed.  Build files cannot be regenerated correctly.
+---
+Failed   <<< my_stereo_pkg [4.95s, exited with code 1]
+
+Summary: 0 packages finished [5.51s]
+  1 package failed: my_stereo_pkg
+  1 package had stderr output: my_stereo_pkg
