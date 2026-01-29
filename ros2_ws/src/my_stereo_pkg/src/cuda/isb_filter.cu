@@ -418,7 +418,8 @@ void launch_guide_upsample_2x(
     int colsOut,
     int candidate_count,
     float var_inv_i,
-    float weight_up
+    float weight_up,
+    float weight_down
 )
 {
     // Validate inputs
@@ -438,10 +439,8 @@ void launch_guide_upsample_2x(
     uchar3* d_guide_high = reinterpret_cast<uchar3*>(get_device_ptr<uint8_t>(guide_high));
     float* d_values_high = get_device_ptr<float>(values_high);
     
-    // Calculate weight_down (spatial weight for downsampling)
-    // In the original code, this is computed from sigma_s
-    // For upsampling, we use the same exponential weight
-    float weight_down = weight_up;  // Typically same weight for both directions
+    // weight_down is passed from caller (computed as exp(-distance^2 * var_inv_s))
+    // weight_up = 1.0 - weight_down
     
     // Calculate grid and block sizes
     int num_pixels_in = rowsIn * colsIn;

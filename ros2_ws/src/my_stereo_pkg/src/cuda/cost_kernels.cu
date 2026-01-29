@@ -240,8 +240,9 @@ __global__ void compute_raw_cost_volume_kernel_hardware_accelerated(
     // Compute cost using hardware texture unit (bilinear interpolation offloaded)
     float cost = 500.0f;  // Default max cost
     
-    if (proj_valid && u_proj >= 1.0f && v_proj >= 1.0f && 
-        u_proj < (cols - 1.0f) && v_proj < (rows - 1.0f)) {
+    // FIXED: Match Python's valid range [0, cols-1] x [0, rows-1]
+    if (proj_valid && u_proj >= 0.0f && v_proj >= 0.0f && 
+        u_proj < static_cast<float>(cols) && v_proj < static_cast<float>(rows)) {
         
         // HARDWARE ACCELERATION: Texture unit handles bilinear interpolation
         // Normalized texture coordinates [0, 1]

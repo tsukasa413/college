@@ -239,6 +239,7 @@ void launch_guide_downsample_2x(
  * @param candidate_count Number of depth candidates
  * @param var_inv_i Inverse variance for intensity difference (1 / sigma_i^2)
  * @param weight_up Spatial weight for upsampling (exp(-dist^2 / sigma_s^2))
+ * @param weight_down Spatial weight for downsampling
  */
 void launch_guide_upsample_2x(
     const at::Tensor& guide_low,
@@ -251,7 +252,8 @@ void launch_guide_upsample_2x(
     int colsOut,
     int candidate_count,
     float var_inv_i,
-    float weight_up
+    float weight_up,
+    float weight_down
 );
 
 // Cost Volume Computation CUDA kernel wrappers

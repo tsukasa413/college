@@ -293,6 +293,25 @@ def verify_full_pipeline():
     print(f"    Time: {py_time:.2f} ms")
     print(f"    RGB shape: {py_rgb.shape}, Distance shape: {py_distance.shape}")
     
+    # DIAGNOSTIC: Probe Python intermediate values at (512, 512)
+    probe_x, probe_y = 512, 512
+    print(f"\n  === PYTHON DIAGNOSTIC PROBE at ({probe_x}, {probe_y}) ===")
+    
+    # Test unproject/project for first camera
+    test_uv = torch.tensor([[probe_x, probe_y]], dtype=torch.float32, device=device)
+    from utils import unproject, project
+    pt_unit, valid = unproject(test_uv, py_calibrations[0])
+    print(f"  [UNPROJECT] Point: {pt_unit[0].cpu().numpy()}, Valid: {valid[0].item()}")
+    
+    # Reproject back
+    uv_back, valid_proj = project(pt_unit, py_calibrations[0])
+    print(f"  [PROJECT] UV back: {uv_back[0].cpu().numpy()}, Valid: {valid_proj[0].item()}")
+    
+    # Note: Cost volume intermediate values would require modifying the Python code
+    # to expose them, which we'll skip for now
+    print(f"  [FINAL DISTANCE] Python: {py_distance[probe_y, probe_x].item():.4f} m")
+    print("  === END PYTHON PROBE ===\n")
+    
     # C++ version
     print("\n  Running C++ RGBDEstimator...")
     torch.cuda.synchronize()
@@ -307,6 +326,11 @@ def verify_full_pipeline():
     
     print(f"    Time: {cpp_time:.2f} ms")
     print(f"    RGB shape: {cpp_rgb.shape}, Distance shape: {cpp_distance.shape}")
+    
+    # DIAGNOSTIC: C++ probe output is printed during execution
+    print(f"\n  === C++ DIAGNOSTIC (see output above) ===")
+    print(f"  [FINAL DISTANCE] C++: {cpp_distance[probe_y, probe_x].item():.4f} m")
+    print("  === END C++ PROBE ===\n")
     
     # ========== Compare Results ==========
     print("\n" + "=" * 80)

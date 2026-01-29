@@ -573,6 +573,18 @@ at::Tensor RGBDEstimator::estimate_fisheye_distance(
     auto stage1_time = std::chrono::duration_cast<std::chrono::microseconds>(t_stage1_end - t_stage1_start).count() / 1000.0;
     std::cout << "[STAGE 1] launch_compute_costs: " << stage1_time << " ms" << std::endl;
     
+    // DIAGNOSTIC: Probe specific pixel (512, 512) - Raw Cost Volume
+    int probe_x = 512, probe_y = 512;
+    if (probe_x < cols && probe_y < rows && ref_camera_idx == 0) {  // Only for first camera
+        std::cout << "\n=== DIAGNOSTIC PROBE at (" << probe_x << ", " << probe_y << ") ===" << std::endl;
+        auto cost_cpu = unified_cost_volume_.cpu();
+        auto cost_accessor = cost_cpu.accessor<float, 3>();
+        std::cout << "[RAW COST] First 5 depth candidates:" << std::endl;
+        for (int d = 0; d < std::min(5, candidate_count_); ++d) {
+            std::cout << "  d=" << d << ": " << cost_accessor[d][probe_y][probe_x] << std::endl;
+        }
+    }
+    
     // Pass 2: Apply ISB Filter to cost volume
     // Edge-preserving smoothing in cost space (critical for accuracy)
     // Python: cost_volume, _ = self.cost_filter.apply(guide, cost_volume, sigma_i, sigma_s)
@@ -587,6 +599,16 @@ at::Tensor RGBDEstimator::estimate_fisheye_distance(
     auto t_stage2_end = std::chrono::high_resolution_clock::now();
     auto stage2_time = std::chrono::duration_cast<std::chrono::microseconds>(t_stage2_end - t_stage2_start).count() / 1000.0;
     std::cout << "[STAGE 2] ISB Filter apply: " << stage2_time << " ms" << std::endl;
+    
+    // DIAGNOSTIC: Probe after ISB filtering
+    if (probe_x < cols && probe_y < rows && ref_camera_idx == 0) {
+        auto filtered_cpu = filtered_cost_volume.cpu();
+        auto filtered_accessor = filtered_cpu.accessor<float, 3>();
+        std::cout << "[FILTERED COST] First 5 depth candidates:" << std::endl;
+        for (int d = 0; d < std::min(5, candidate_count_); ++d) {
+            std::cout << "  d=" << d << ": " << filtered_accessor[d][probe_y][probe_x] << std::endl;
+        }
+    }
     
     // Pass 3: Winner-Take-All + Quadratic Fitting
     // Compute final depth from ISB-filtered cost volume
@@ -605,21 +627,36 @@ at::Tensor RGBDEstimator::estimate_fisheye_distance(
     auto stage3_time = std::chrono::duration_cast<std::chrono::microseconds>(t_stage3_end - t_stage3_start).count() / 1000.0;
     std::cout << "[STAGE 3] launch_final_depth: " << stage3_time << " ms" << std::endl;
     
-    // Optional: Light post-filtering on distance map (much weaker than Python version)
-    // Python version doesn't apply distance filter after cost filter
-    // We apply very light filtering only for noise reduction
+    // DIAGNOSTIC: Probe final distance before post-filtering
+    if (probe_x < cols && probe_y < rows && ref_camera_idx == 0) {
+        auto dist_cpu = temp_distance_buffer_.cpu();
+        auto dist_accessor = dist_cpu.accessor<float, 2>();
+        std::cout << "[BEFORE POST-FILTER] Distance: " << dist_accessor[probe_y][probe_x] << " m" << std::endl;
+    }
+    
+    // Optional: Light post-filtering on distance map (MATCHES Python implementation)
+    // Python: self.distance_filter.apply(guide.clone(), distance_map.clone(), self.sigma_i/2, self.sigma_s/2)
+    // Higher edge preservation for distance map
     auto t_postfilter_start = std::chrono::high_resolution_clock::now();
     auto distance_map_batched = temp_distance_buffer_.unsqueeze(0);
     auto distance_filter_result = distance_filter_->apply(
         guide, // Remove .clone() to avoid dynamic allocation
         distance_map_batched, 
-        sigma_i_ * 2.0f,  // Much weaker color preservation
-        sigma_s_ * 2.0f   // Much weaker spatial preservation
+        sigma_i_ / 2.0f,  // Higher edge preservation (FIXED: was * 2.0f)
+        sigma_s_ / 2.0f   // Higher edge preservation (FIXED: was * 2.0f)
     );
     auto filtered_distance = distance_filter_result.first;
     auto t_postfilter_end = std::chrono::high_resolution_clock::now();
     auto postfilter_time = std::chrono::duration_cast<std::chrono::microseconds>(t_postfilter_end - t_postfilter_start).count() / 1000.0;
     std::cout << "[POST-FILTER] Distance filter: " << postfilter_time << " ms" << std::endl;
+    
+    // DIAGNOSTIC: Probe final distance after post-filtering
+    if (probe_x < cols && probe_y < rows && ref_camera_idx == 0) {
+        auto final_cpu = filtered_distance.squeeze(0).cpu();
+        auto final_accessor = final_cpu.accessor<float, 2>();
+        std::cout << "[AFTER POST-FILTER] Distance: " << final_accessor[probe_y][probe_x] << " m" << std::endl;
+        std::cout << "=== END DIAGNOSTIC PROBE ===\n" << std::endl;
+    }
     
     // Profiling summary
     auto t_func_end = std::chrono::high_resolution_clock::now();
