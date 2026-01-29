@@ -16,14 +16,17 @@ export LD_LIBRARY_PATH=/home/motoken/.local/lib/python3.10/site-packages/torch/l
 # Get the directory of this script
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Navigate to workspace root (2 levels up from src/my_stereo_pkg/)
+WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
 # Path to the standalone estimator executable
-ESTIMATOR_BIN="$SCRIPT_DIR/install/my_stereo_pkg/lib/my_stereo_pkg/standalone_estimator"
+ESTIMATOR_BIN="$WORKSPACE_ROOT/install/my_stereo_pkg/lib/my_stereo_pkg/standalone_estimator"
 
 # Check if executable exists
 if [ ! -f "$ESTIMATOR_BIN" ]; then
     echo "Error: Executable not found at $ESTIMATOR_BIN"
     echo "Please build the package first:"
-    echo "  cd $SCRIPT_DIR && colcon build --packages-select my_stereo_pkg"
+    echo "  cd $WORKSPACE_ROOT && colcon build --packages-select my_stereo_pkg"
     exit 1
 fi
 

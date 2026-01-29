@@ -22,16 +22,33 @@ colcon build --packages-select my_stereo_pkg
 
 ## 実行方法
 
-### 基本的な実行
+### 🚀 **推奨方法: 実行スクリプト使用**
 
+```bash
+# パッケージディレクトリから実行
+cd /home/motoken/college/ros2_ws/src/my_stereo_pkg
+./run_standalone_estimator.sh
+
+# またはワークスペースルートから
+cd /home/motoken/college/ros2_ws
+./src/my_stereo_pkg/run_standalone_estimator.sh
+```
+
+**カスタムパスを指定:**
+```bash
+./src/my_stereo_pkg/run_standalone_estimator.sh <dataset_path> <output_dir>
+```
+
+### 📝 **直接実行（手動）**
+
+基本的な実行:
 ```bash
 cd /home/motoken/college/ros2_ws
 LD_LIBRARY_PATH=/home/motoken/.local/lib/python3.10/site-packages/torch/lib:$LD_LIBRARY_PATH \
 ./install/my_stereo_pkg/lib/my_stereo_pkg/standalone_estimator
 ```
 
-### カスタムパスを指定
-
+カスタムパスを指定:
 ```bash
 LD_LIBRARY_PATH=/home/motoken/.local/lib/python3.10/site-packages/torch/lib:$LD_LIBRARY_PATH \
 ./install/my_stereo_pkg/lib/my_stereo_pkg/standalone_estimator \
