@@ -13,8 +13,7 @@ Proc. IEEE Computer Vision and Pattern Recognition (CVPR 2021, Oral)
 #include <cmath>
 #include <stdexcept>
 #include <cuda_runtime.h>
-#include <chrono>
-#include <iostream>
+#include <nvToolsExt.h>
 
 namespace my_stereo_pkg {
 
@@ -230,15 +229,6 @@ void RGBDEstimator::allocate_unified_buffers() {
         options
     );
     
-    std::cout << "\n=== Unified Memory Buffers Allocated ===" << std::endl;
-    std::cout << "  Sweeping volume: " << sweeping_volume_size_ / (1024.0 * 1024.0) << " MB" << std::endl;
-    std::cout << "  Cost volume: " << cost_volume_size_ / (1024.0 * 1024.0) << " MB" << std::endl;
-    std::cout << "  Distance map: " << distance_map_size_ / (1024.0 * 1024.0) << " MB" << std::endl;
-    std::cout << "  Input buffer: " << input_buffer_size_ / (1024.0 * 1024.0) << " MB" << std::endl;
-    std::cout << "  Total: " << (sweeping_volume_size_ + cost_volume_size_ + 
-                                distance_map_size_ + input_buffer_size_) / (1024.0 * 1024.0) 
-              << " MB" << std::endl;
-    
     // Pre-allocate per-camera buffers to avoid dynamic allocation in run loop
     int num_refs = references_indices_.size();
     per_camera_distance_maps_.reserve(num_refs);
@@ -257,8 +247,6 @@ void RGBDEstimator::allocate_unified_buffers() {
     
     // Temporary buffer for final depth kernel output
     temp_distance_buffer_ = at::zeros({rows, cols}, tensor_options.dtype(at::kFloat));
-    
-    std::cout << "  Per-camera buffers: " << (num_refs * rows * cols * (sizeof(float) + 3) / (1024.0 * 1024.0)) << " MB" << std::endl;
 }
 
 void RGBDEstimator::free_unified_buffers() {
@@ -492,10 +480,13 @@ at::Tensor RGBDEstimator::estimate_fisheye_distance(
     /**
      * Estimate distance map for a single fisheye reference image
      * Uses hardware-accelerated texture units + constant memory
+     * NVTX profiling enabled for Nsight Systems
      */
     
-    std::cout << "\n=== PROFILING: estimate_fisheye_distance ===" << std::endl;
-    auto t_func_start = std::chrono::high_resolution_clock::now();
+    nvtxRangePushA("estimate_fisheye_distance");
+    
+    // CRITICAL: All CUDA operations use default stream for synchronous execution
+    // NVTX markers enable profiling without introducing CPU/GPU sync overhead
     
     int cols = matching_resolution_.first;
     int rows = matching_resolution_.second;
@@ -550,12 +541,7 @@ at::Tensor RGBDEstimator::estimate_fisheye_distance(
     // ========================================================================
     
     // Pass 1: Compute raw cost volume [D, H, W] - ASYNC with hardware acceleration
-    // Uses texture acceleration + constant memory + Double Sphere projection
-    std::cout << "[MEMORY] Unified cost volume allocated: " << unified_cost_volume_.dtype() 
-              << ", shape: [" << unified_cost_volume_.size(0) << ", " 
-              << unified_cost_volume_.size(1) << ", " << unified_cost_volume_.size(2) << "]" << std::endl;
-    
-    auto t_stage1_start = std::chrono::high_resolution_clock::now();
+    nvtxRangePushA("Stage1_ComputeCostVolume");
     launch_compute_costs_async(
         images_hwc,
         ref_image_hwc,
@@ -569,53 +555,23 @@ at::Tensor RGBDEstimator::estimate_fisheye_distance(
         cols,
         nullptr  // Use default CUDA stream (synchronous execution)
     );
-    auto t_stage1_end = std::chrono::high_resolution_clock::now();
-    auto stage1_time = std::chrono::duration_cast<std::chrono::microseconds>(t_stage1_end - t_stage1_start).count() / 1000.0;
-    std::cout << "[STAGE 1] launch_compute_costs: " << stage1_time << " ms" << std::endl;
-    
-    // DIAGNOSTIC: Probe specific pixel (512, 512) - Raw Cost Volume
-    int probe_x = 512, probe_y = 512;
-    if (probe_x < cols && probe_y < rows && ref_camera_idx == 0) {  // Only for first camera
-        std::cout << "\n=== DIAGNOSTIC PROBE at (" << probe_x << ", " << probe_y << ") ===" << std::endl;
-        auto cost_cpu = unified_cost_volume_.cpu();
-        auto cost_accessor = cost_cpu.accessor<float, 3>();
-        std::cout << "[RAW COST] First 5 depth candidates:" << std::endl;
-        for (int d = 0; d < std::min(5, candidate_count_); ++d) {
-            std::cout << "  d=" << d << ": " << cost_accessor[d][probe_y][probe_x] << std::endl;
-        }
-    }
+    nvtxRangePop();  // Stage1_ComputeCostVolume
     
     // Pass 2: Apply ISB Filter to cost volume
     // Edge-preserving smoothing in cost space (critical for accuracy)
-    // Python: cost_volume, _ = self.cost_filter.apply(guide, cost_volume, sigma_i, sigma_s)
-    auto t_stage2_start = std::chrono::high_resolution_clock::now();
+    nvtxRangePushA("Stage2_ISBFilter_Cost");
     auto filtered_cost_result = cost_filter_->apply(
-        guide, // Remove .clone() to avoid dynamic allocation
-        unified_cost_volume_,  // Input: raw cost [D, H, W]
-        sigma_i_,              // Color similarity threshold
-        sigma_s_               // Spatial similarity threshold
+        guide,
+        unified_cost_volume_,
+        sigma_i_,
+        sigma_s_
     );
-    auto filtered_cost_volume = filtered_cost_result.first;  // [D, H, W]
-    auto t_stage2_end = std::chrono::high_resolution_clock::now();
-    auto stage2_time = std::chrono::duration_cast<std::chrono::microseconds>(t_stage2_end - t_stage2_start).count() / 1000.0;
-    std::cout << "[STAGE 2] ISB Filter apply: " << stage2_time << " ms" << std::endl;
-    
-    // DIAGNOSTIC: Probe after ISB filtering
-    if (probe_x < cols && probe_y < rows && ref_camera_idx == 0) {
-        auto filtered_cpu = filtered_cost_volume.cpu();
-        auto filtered_accessor = filtered_cpu.accessor<float, 3>();
-        std::cout << "[FILTERED COST] First 5 depth candidates:" << std::endl;
-        for (int d = 0; d < std::min(5, candidate_count_); ++d) {
-            std::cout << "  d=" << d << ": " << filtered_accessor[d][probe_y][probe_x] << std::endl;
-        }
-    }
+    auto filtered_cost_volume = filtered_cost_result.first;
+    nvtxRangePop();  // Stage2_ISBFilter_Cost
     
     // Pass 3: Winner-Take-All + Quadratic Fitting
-    // Compute final depth from ISB-filtered cost volume
-    // Use pre-allocated temp buffer to avoid dynamic allocation
-    auto t_stage3_start = std::chrono::high_resolution_clock::now();
-    temp_distance_buffer_.zero_();  // Clear buffer
-    
+    nvtxRangePushA("Stage3_FinalDepth");
+    temp_distance_buffer_.zero_();
     launch_final_depth(
         filtered_cost_volume,
         distance_candidates_,
@@ -623,52 +579,21 @@ at::Tensor RGBDEstimator::estimate_fisheye_distance(
         rows,
         cols
     );
-    auto t_stage3_end = std::chrono::high_resolution_clock::now();
-    auto stage3_time = std::chrono::duration_cast<std::chrono::microseconds>(t_stage3_end - t_stage3_start).count() / 1000.0;
-    std::cout << "[STAGE 3] launch_final_depth: " << stage3_time << " ms" << std::endl;
-    
-    // DIAGNOSTIC: Probe final distance before post-filtering
-    if (probe_x < cols && probe_y < rows && ref_camera_idx == 0) {
-        auto dist_cpu = temp_distance_buffer_.cpu();
-        auto dist_accessor = dist_cpu.accessor<float, 2>();
-        std::cout << "[BEFORE POST-FILTER] Distance: " << dist_accessor[probe_y][probe_x] << " m" << std::endl;
-    }
+    nvtxRangePop();  // Stage3_FinalDepth
     
     // Optional: Light post-filtering on distance map (MATCHES Python implementation)
-    // Python: self.distance_filter.apply(guide.clone(), distance_map.clone(), self.sigma_i/2, self.sigma_s/2)
-    // Higher edge preservation for distance map
-    auto t_postfilter_start = std::chrono::high_resolution_clock::now();
+    nvtxRangePushA("Stage4_PostFilter_Distance");
     auto distance_map_batched = temp_distance_buffer_.unsqueeze(0);
     auto distance_filter_result = distance_filter_->apply(
-        guide, // Remove .clone() to avoid dynamic allocation
-        distance_map_batched, 
-        sigma_i_ / 2.0f,  // Higher edge preservation (FIXED: was * 2.0f)
-        sigma_s_ / 2.0f   // Higher edge preservation (FIXED: was * 2.0f)
+        guide,
+        distance_map_batched,
+        sigma_i_ / 2.0f,
+        sigma_s_ / 2.0f
     );
     auto filtered_distance = distance_filter_result.first;
-    auto t_postfilter_end = std::chrono::high_resolution_clock::now();
-    auto postfilter_time = std::chrono::duration_cast<std::chrono::microseconds>(t_postfilter_end - t_postfilter_start).count() / 1000.0;
-    std::cout << "[POST-FILTER] Distance filter: " << postfilter_time << " ms" << std::endl;
+    nvtxRangePop();  // Stage4_PostFilter_Distance
     
-    // DIAGNOSTIC: Probe final distance after post-filtering
-    if (probe_x < cols && probe_y < rows && ref_camera_idx == 0) {
-        auto final_cpu = filtered_distance.squeeze(0).cpu();
-        auto final_accessor = final_cpu.accessor<float, 2>();
-        std::cout << "[AFTER POST-FILTER] Distance: " << final_accessor[probe_y][probe_x] << " m" << std::endl;
-        std::cout << "=== END DIAGNOSTIC PROBE ===\n" << std::endl;
-    }
-    
-    // Profiling summary
-    auto t_func_end = std::chrono::high_resolution_clock::now();
-    auto total_gpu_time = stage1_time + stage2_time + stage3_time + postfilter_time;
-    auto total_func_time = std::chrono::duration_cast<std::chrono::microseconds>(t_func_end - t_func_start).count() / 1000.0;
-    auto overhead_time = total_func_time - total_gpu_time;
-    
-    std::cout << "[SUMMARY] Total GPU compute time: " << total_gpu_time << " ms" << std::endl;
-    std::cout << "[SUMMARY] Total function time: " << total_func_time << " ms" << std::endl;
-    std::cout << "[SUMMARY] Overhead (sync/memory): " << overhead_time << " ms" << std::endl;
-    std::cout << "=== END PROFILING ===\n" << std::endl;
-    
+    nvtxRangePop();  // estimate_fisheye_distance
     return filtered_distance.squeeze(0);
 }
 
@@ -678,25 +603,14 @@ std::pair<at::Tensor, at::Tensor> RGBDEstimator::run(
 {
     /**
      * Complete RGBD estimation pipeline
-     * Faithfully ported from depth_estimation.py estimate_RGBD_panorama()
-     * 
-     * Processing flow (Zero-Copy Architecture):
-     * 1. Prepare images for matching (permute to [1, C, 1, H, W] format)
-     * 2. For each reference camera:
-     *    - Create YCbCr guide image (uint8)
-     *    - Call estimate_fisheye_distance with ISBFilter (uses unified buffers)
-     * 3. Stitch distance maps into RGB-D panorama using Stitcher
-     * 
-     * Memory management: Unified memory buffers pre-allocated in constructor
+     * NVTX-enabled for Nsight Systems profiling
+     * Zero-copy architecture with unified memory buffers
      */
     
-    std::cout << "\n=== PROFILING: RGBDEstimator::run() ===" << std::endl;
-    auto t_run_start = std::chrono::high_resolution_clock::now();
+    nvtxRangePushA("RGBDEstimator::run");
     
     // Prepare images for matching: permute to [1, C, 1, H, W] format
-    // Matches Python: images_to_match_permuted = [image.unsqueeze(0).permute(0, 3, 1, 2).unsqueeze(2)
-    //                                              for image in images_to_match]
-    auto t_prep_start = std::chrono::high_resolution_clock::now();
+    nvtxRangePushA("Preparation_Permute");
     std::vector<at::Tensor> images_to_match_permuted;
     images_to_match_permuted.reserve(images_to_match.size());
     for (const auto& image : images_to_match) {
@@ -706,13 +620,10 @@ std::pair<at::Tensor, at::Tensor> RGBDEstimator::run(
         auto permuted = image.unsqueeze(0).permute({0, 3, 1, 2}).unsqueeze(2);
         images_to_match_permuted.push_back(permuted);
     }
-    auto t_prep_end = std::chrono::high_resolution_clock::now();
-    auto prep_time = std::chrono::duration_cast<std::chrono::microseconds>(t_prep_end - t_prep_start).count() / 1000.0;
-    std::cout << "[PREPARATION] Image permutation: " << prep_time << " ms" << std::endl;
+    nvtxRangePop();  // Preparation_Permute
     
-    // ZERO-WAIT PIPELINE: Launch all 4 cameras asynchronously in parallel streams
-    // Each camera processes in its own stream without waiting for others
-    auto t_distance_start = std::chrono::high_resolution_clock::now();
+    // ZERO-WAIT PIPELINE: Process all reference cameras
+    nvtxRangePushA("DistanceEstimation_AllCameras");
     std::vector<at::Tensor> distance_maps;
     distance_maps.reserve(references_indices_.size());
     
@@ -720,6 +631,10 @@ std::pair<at::Tensor, at::Tensor> RGBDEstimator::run(
     for (size_t i = 0; i < references_indices_.size(); ++i) {
         int ref_idx = references_indices_[i];
         const auto& selected_camera = selected_cameras_[i];
+        
+        // NVTX marker for per-camera processing
+        std::string camera_label = "Camera_" + std::to_string(ref_idx);
+        nvtxRangePushA(camera_label.c_str());
         
         // Create YCbCr guide image
         auto ycbcr_result = rgb_to_ycbcr(images_to_match[ref_idx]);
@@ -736,36 +651,26 @@ std::pair<at::Tensor, at::Tensor> RGBDEstimator::run(
         
         per_camera_distance_maps_[i].copy_(distance_map);
         distance_maps.push_back(per_camera_distance_maps_[i]);
+        
+        nvtxRangePop();  // Camera_X
     }
-    
-    auto t_distance_end = std::chrono::high_resolution_clock::now();
-    auto distance_time = std::chrono::duration_cast<std::chrono::microseconds>(t_distance_end - t_distance_start).count() / 1000.0;
+    nvtxRangePop();  // DistanceEstimation_AllCameras
     
     // Prepare images for stitching: convert to uint8
-    // Matches Python: images_to_stitch = [reference_image.type(torch.uint8)
-    //                                      for reference_image in images_to_stitch]
+    nvtxRangePushA("Preparation_Stitching");
     std::vector<at::Tensor> images_to_stitch_uint8;
     images_to_stitch_uint8.reserve(images_to_stitch.size());
     for (const auto& image : images_to_stitch) {
         images_to_stitch_uint8.push_back(image.to(at::kByte));
     }
+    nvtxRangePop();  // Preparation_Stitching
     
     // Stitching
-    auto t_stitch_start = std::chrono::high_resolution_clock::now();
+    nvtxRangePushA("Stitching");
     auto [rgb, distance] = fisheye_stitcher_->stitch(images_to_stitch_uint8, distance_maps);
-    auto t_stitch_end = std::chrono::high_resolution_clock::now();
-    auto stitch_time = std::chrono::duration_cast<std::chrono::microseconds>(t_stitch_end - t_stitch_start).count() / 1000.0;
+    nvtxRangePop();  // Stitching
     
-    // Performance summary
-    auto t_run_end = std::chrono::high_resolution_clock::now();
-    auto total_run_time = std::chrono::duration_cast<std::chrono::microseconds>(t_run_end - t_run_start).count() / 1000.0;
-    
-    std::cout << "\n=== PERFORMANCE SUMMARY ===" << std::endl;
-    std::cout << "Distance estimation: " << distance_time << " ms" << std::endl;
-    std::cout << "Stitching: " << stitch_time << " ms" << std::endl;
-    std::cout << "Total: " << total_run_time << " ms (" << (1000.0f / total_run_time) << " FPS)" << std::endl;
-    std::cout << "=========================\n" << std::endl;
-    
+    nvtxRangePop();  // RGBDEstimator::run
     return {rgb, distance};
 }
 

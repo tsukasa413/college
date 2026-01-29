@@ -103,6 +103,7 @@ set_source_files_properties(
 # Link CUDA libraries to kernels library
 target_link_libraries(cuda_kernels_lib PUBLIC
   CUDA::cudart
+  CUDA::nvToolsExt
   ${TORCH_LIBRARIES}
 )
 
@@ -128,6 +129,7 @@ target_compile_options(stitcher_lib PRIVATE
 # Link Stitcher library with CUDA kernels and PyTorch
 target_link_libraries(stitcher_lib PUBLIC
   cuda_kernels_lib
+  CUDA::nvToolsExt
   ${TORCH_LIBRARIES}
 )
 
