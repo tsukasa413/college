@@ -19,6 +19,9 @@
   <!-- System dependencies (handled by find_package in CMakeLists.txt) -->
   <!-- torch: PyTorch C++ API -->
   <!-- cuda: NVIDIA CUDA toolkit -->
+  <!-- eigen3: Linear algebra library -->
+  <!-- nlohmann_json: JSON parsing (header-only) -->
+  <!-- opencv: Image I/O and processing -->
   
   <!-- Documentation -->
   <doc_depend>doxygen</doc_depend>

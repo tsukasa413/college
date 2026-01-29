@@ -31,6 +31,19 @@ find_package(ament_cmake_python REQUIRED)
 # find_package(sensor_msgs REQUIRED)
 # find_package(cv_bridge REQUIRED)  # Temporarily disabled due to OpenCV issues
 
+# Find OpenCV (required for standalone estimator)
+# Manually find OpenCV libraries - use the actual .so files in aarch64-linux-gnu
+set(OpenCV_INCLUDE_DIRS "/usr/include/opencv4")
+set(OpenCV_LIBS 
+  /usr/lib/aarch64-linux-gnu/libopencv_core.so.4.5d
+  /usr/lib/aarch64-linux-gnu/libopencv_imgcodecs.so.4.5d
+  /usr/lib/aarch64-linux-gnu/libopencv_imgproc.so.4.5d
+  /usr/lib/aarch64-linux-gnu/libopencv_calib3d.so.4.5d
+)
+
+message(STATUS "Using OpenCV from: ${OpenCV_INCLUDE_DIRS}")
+message(STATUS "OpenCV libraries: ${OpenCV_LIBS}")
+
 # Find PyTorch 
 set(CMAKE_PREFIX_PATH "/home/motoken/.local/lib/python3.10/site-packages/torch/share/cmake/Torch;${CMAKE_PREFIX_PATH}")
 find_package(Torch REQUIRED)
@@ -48,6 +61,9 @@ message(STATUS "PyTorch Python library: ${TORCH_PYTHON_LIBRARY}")
 # Find CUDA
 find_package(CUDAToolkit REQUIRED)
 
+# Find Eigen3 (for standalone estimator)
+find_package(Eigen3 REQUIRED)
+
 # Find pybind11
 find_package(pybind11 REQUIRED)
 
@@ -63,6 +79,8 @@ include_directories(
   ${TORCH_INCLUDE_DIRS}
   ${Python3_INCLUDE_DIRS}
   ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
+  ${EIGEN3_INCLUDE_DIR}
+  ${OpenCV_INCLUDE_DIRS}
 )
 
 # Create CUDA kernels library
@@ -164,6 +182,36 @@ ament_python_install_package(${PROJECT_NAME})
 # Install the pybind11 module
 install(TARGETS _core_cpp
   DESTINATION "${PYTHON_INSTALL_DIR}/${PROJECT_NAME}"
+)
+
+# Create standalone C++ executable
+add_executable(standalone_estimator
+  src/standalone_estimator.cpp
+)
+
+# Set properties for standalone executable
+set_target_properties(standalone_estimator PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED ON
+)
+
+# Link standalone executable with all required libraries
+target_link_libraries(standalone_estimator PRIVATE
+  stitcher_lib
+  cuda_kernels_lib
+  ${TORCH_LIBRARIES}
+  ${OpenCV_LIBS}
+  CUDA::nvToolsExt
+)
+
+# Apply PyTorch C++ flags
+target_compile_options(standalone_estimator PRIVATE
+  ${TORCH_CXX_FLAGS}
+)
+
+# Install standalone executable
+install(TARGETS standalone_estimator
+  DESTINATION lib/${PROJECT_NAME}
 )
 
 # Install Python scripts
