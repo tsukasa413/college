@@ -370,7 +370,8 @@ void launch_guide_downsample_2x(
     int colsOut,
     int candidate_count,
     float var_inv_i,
-    float weight_down
+    float weight_down,
+    cudaStream_t stream
 )
 {
     // Validate inputs
@@ -395,16 +396,15 @@ void launch_guide_downsample_2x(
     int blockSize = 256;  // Standard block size
     int gridSize = (num_pixels_out + blockSize - 1) / blockSize;
     
-    // Launch kernel
-    guideDownsample2xKernel<<<gridSize, blockSize>>>(
+    // Launch kernel on specified stream (CRITICAL for true parallelization)
+    guideDownsample2xKernel<<<gridSize, blockSize, 0, stream>>>(
         d_guide_in, d_values_in, rowsIn, colsIn,
         d_guide_out, d_values_out, rowsOut, colsOut,
         var_inv_i, candidate_count
     );
     
-    // Check for errors
+    // Check for errors (do NOT synchronize - async execution)
     CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaDeviceSynchronize());
 }
 
 void launch_guide_upsample_2x(
@@ -419,7 +419,8 @@ void launch_guide_upsample_2x(
     int candidate_count,
     float var_inv_i,
     float weight_up,
-    float weight_down
+    float weight_down,
+    cudaStream_t stream
 )
 {
     // Validate inputs
@@ -447,14 +448,13 @@ void launch_guide_upsample_2x(
     int blockSize = 256;
     int gridSize = (num_pixels_in + blockSize - 1) / blockSize;
     
-    // Launch kernel
-    guideUpsample2xKernel<<<gridSize, blockSize>>>(
+    // Launch kernel on specified stream (CRITICAL for true parallelization)
+    guideUpsample2xKernel<<<gridSize, blockSize, 0, stream>>>(
         d_guide_low, d_values_low, rowsIn, colsIn,
         d_guide_high, d_values_high, rowsOut, colsOut,
         weight_up, weight_down, var_inv_i, candidate_count
     );
     
-    // Check for errors
+    // Check for errors (do NOT synchronize - async execution)
     CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaDeviceSynchronize());
 }

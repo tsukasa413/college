@@ -58,7 +58,8 @@ std::pair<at::Tensor, at::Tensor> ISBFilter::apply(
     const at::Tensor& guide,
     const at::Tensor& cost,
     float sigma_i,
-    float sigma_s)
+    float sigma_s,
+    cudaStream_t stream)
 {
     // Validate inputs
     TORCH_CHECK(guide.dim() == 3 && guide.size(2) == 3, 
@@ -92,7 +93,7 @@ std::pair<at::Tensor, at::Tensor> ISBFilter::apply(
         // weight_down parameter (not used in downsample, but kept for consistency)
         float weight_down = 1.0f;
         
-        // Launch downsampling kernel
+        // Launch downsampling kernel on specified stream
         launch_guide_downsample_2x(
             guides_[scale - 1],  // guide_in
             costs_[scale - 1],   // values_in
@@ -104,7 +105,8 @@ std::pair<at::Tensor, at::Tensor> ISBFilter::apply(
             cols_out,
             candidate_count_,
             var_inv_i,
-            weight_down
+            weight_down,
+            stream  // CRITICAL: Pass stream for async execution
         );
     }
     
@@ -123,7 +125,7 @@ std::pair<at::Tensor, at::Tensor> ISBFilter::apply(
         float weight_down = std::exp(-(distance * distance) * var_inv_s);
         float weight_up = 1.0f - weight_down;
         
-        // Launch upsampling kernel
+        // Launch upsampling kernel on specified stream
         launch_guide_upsample_2x(
             guides_[scale + 1],  // guide_low
             costs_[scale + 1],   // values_low
@@ -136,7 +138,8 @@ std::pair<at::Tensor, at::Tensor> ISBFilter::apply(
             candidate_count_,
             var_inv_i,
             weight_up,
-            weight_down
+            weight_down,
+            stream  // CRITICAL: Pass stream for async execution
         );
     }
     

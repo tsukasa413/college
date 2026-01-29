@@ -274,8 +274,9 @@ std::pair<at::Tensor, at::Tensor> Stitcher::stitch(
         reprojected_distance.fill_(1e8);
         
         for (int pass = 0; pass < 2; pass++) {
+            // ZERO-COPY: Assume distance_map is already on device_ and contiguous
             launch_reproject_distance(
-                distance_map.to(device_).contiguous(),
+                distance_map,
                 reprojected_distance,
                 intrinsics,
                 translation,
@@ -293,9 +294,9 @@ std::pair<at::Tensor, at::Tensor> Stitcher::stitch(
             );
         }
         
-        // Copy image and distance map to stitch buffers
-        image_to_stitch.copy_(image.to(device_));
-        distance_stack.copy_(distance_map.to(device_));
+        // ZERO-COPY: Assume image and distance_map are already on device_ and contiguous
+        image_to_stitch.copy_(image);
+        distance_stack.copy_(distance_map);
     }
     
     // Merge all views into panorama using CUDA kernel

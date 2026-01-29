@@ -12,6 +12,7 @@ Proc. IEEE Computer Vision and Pattern Recognition (CVPR 2021, Oral)
 #pragma once
 
 #include <torch/torch.h>
+#include <cuda_runtime.h>
 #include <vector>
 
 namespace my_stereo_pkg {
@@ -37,13 +38,15 @@ public:
      * @param cost Cost volume [candidate_count, H, W] (float32) to be filtered
      * @param sigma_i Edge preservation parameter (lower = preserve edges more)
      * @param sigma_s Smoothing parameter (higher = more smoothing from coarse scales)
+     * @param stream CUDA stream for async execution (default: current stream)
      * @return Pair of filtered cost volume and guide image
      */
     std::pair<at::Tensor, at::Tensor> apply(
         const at::Tensor& guide,
         const at::Tensor& cost,
         float sigma_i,
-        float sigma_s);
+        float sigma_s,
+        cudaStream_t stream = nullptr);
 
     /**
      * Get the number of pyramid scales used

@@ -211,6 +211,7 @@ bool check_cuda_availability();
  * @param candidate_count Number of depth candidates
  * @param var_inv_i Inverse variance for intensity difference (1 / sigma_i^2)
  * @param weight_down Spatial weight for downsampling (exp(-dist^2 / sigma_s^2))
+ * @param stream CUDA stream for async execution (nullptr = default stream)
  */
 void launch_guide_downsample_2x(
     const at::Tensor& guide_in,
@@ -223,7 +224,8 @@ void launch_guide_downsample_2x(
     int colsOut,
     int candidate_count,
     float var_inv_i,
-    float weight_down
+    float weight_down,
+    cudaStream_t stream = nullptr
 );
 
 /**
@@ -240,6 +242,7 @@ void launch_guide_downsample_2x(
  * @param var_inv_i Inverse variance for intensity difference (1 / sigma_i^2)
  * @param weight_up Spatial weight for upsampling (exp(-dist^2 / sigma_s^2))
  * @param weight_down Spatial weight for downsampling
+ * @param stream CUDA stream for async execution (nullptr = default stream)
  */
 void launch_guide_upsample_2x(
     const at::Tensor& guide_low,
@@ -253,7 +256,8 @@ void launch_guide_upsample_2x(
     int candidate_count,
     float var_inv_i,
     float weight_up,
-    float weight_down
+    float weight_down,
+    cudaStream_t stream = nullptr
 );
 
 // Cost Volume Computation CUDA kernel wrappers
@@ -285,9 +289,33 @@ void launch_compute_costs(
 );
 
 /**
- * ASYNC version with CUDA stream support
+ * Initialize constant memory with distance candidates (CALL ONCE at startup)
+ * Eliminates per-frame cudaMemcpyToSymbol synchronization overhead
+ */
+void initialize_constant_memory(
+    const float* distance_candidates,
+    int candidate_count
+);
+
+/**
+ * Update CUDA texture from GPU tensor (ZERO CPU SYNC)
+ * Critical: Eliminates .cpu() bottleneck in hot path
+ */
+void update_texture_from_gpu(
+    const at::Tensor& image,
+    cudaArray* cuArray,
+    cudaStream_t stream
+);
+
+/**
+ * ASYNC version with pre-created textures (ELIMINATES .cpu() sync)
+ * @param texture_objects Pre-allocated texture objects [num_cameras]
+ * @param images Source images for texture update [num_cameras][H,W,3]
+ * @param stream CUDA stream for async execution
  */
 void launch_compute_costs_async(
+    const std::vector<cudaTextureObject_t>& texture_objects,
+    const std::vector<cudaArray*>& texture_arrays,
     const std::vector<at::Tensor>& images,
     const at::Tensor& reference_image,
     const at::Tensor& selected_camera_map,

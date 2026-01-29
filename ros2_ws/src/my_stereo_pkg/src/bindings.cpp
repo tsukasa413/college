@@ -169,7 +169,15 @@ PYBIND11_MODULE(_core_cpp, m) {
             "    candidate_count: Number of depth candidates (cost volume channels)\n"
             "    resolution: Tuple of (cols, rows) for the image resolution\n"
             "    device: CUDA device for processing (e.g., torch.device('cuda:0'))")
-        .def("apply", &my_stereo_pkg::ISBFilter::apply,
+        .def("apply", 
+            [](my_stereo_pkg::ISBFilter& self,
+               const at::Tensor& guide,
+               const at::Tensor& cost,
+               float sigma_i,
+               float sigma_s) {
+                // Python binding wrapper: Call with default stream (nullptr)
+                return self.apply(guide, cost, sigma_i, sigma_s, nullptr);
+            },
             py::arg("guide"),
             py::arg("cost"),
             py::arg("sigma_i"),
