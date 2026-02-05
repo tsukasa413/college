@@ -244,7 +244,7 @@ void RGBDEstimator::allocate_unified_buffers() {
     cudaMallocManaged(&unified_distance_map_ptr_, distance_map_size_);
     cudaMallocManaged(&unified_input_buffer_ptr_, input_buffer_size_);
     
-    // Wrap with LibTorch tensors using at::from_blob
+    // Wrap with LibTorch tensors using at::from_blob (FP32 for unified memory compatibility)
     auto options = at::TensorOptions().dtype(at::kFloat).device(device_);
     
     unified_sweeping_volume_ = at::from_blob(
@@ -297,7 +297,7 @@ void RGBDEstimator::allocate_unified_buffers() {
         per_camera_cost_volumes_.push_back(
             at::zeros({candidate_count_, rows, cols}, tensor_options.dtype(at::kFloat)));
         
-        // CRITICAL: Per-camera temp distance buffer [H, W] (eliminates contention)
+        // CRITICAL: Per-camera temp distance buffer [H, W] float32
         per_camera_temp_distance_buffers_.push_back(
             at::zeros({rows, cols}, tensor_options.dtype(at::kFloat)));
     }
@@ -480,8 +480,7 @@ void RGBDEstimator::precompute_relative_rt_matrices()
 
 void RGBDEstimator::rgb_to_ycbcr(const at::Tensor& rgb_image, at::Tensor& ycbcr_out)
 {
-    // RGB to YCbCr conversion - MUST match Python utils.py rgb2yCbCr exactly
-    // Note: Input is BGR from OpenCV, treated as RGB by Python code
+    // RGB to YCbCr conversion using CUDA kernel (eliminates LibTorch overhead)
     // Y  = 16  + 0.1826*R + 0.6142*G + 0.062*B,  clamp [16, 235]
     // Cb = 128 - 0.1006*R - 0.3386*G + 0.4392*B, clamp [16, 240]
     // Cr = 128 + 0.4392*R - 0.3989*G - 0.0403*B, clamp [16, 240]
@@ -489,19 +488,12 @@ void RGBDEstimator::rgb_to_ycbcr(const at::Tensor& rgb_image, at::Tensor& ycbcr_
     TORCH_CHECK(rgb_image.dim() == 3 && rgb_image.size(2) == 3,
                 "RGB image must be [H, W, 3]");
     
-    auto rgb = rgb_image.to(at::kFloat);
-    auto r = rgb.index({at::indexing::Slice(), at::indexing::Slice(), 0});
-    auto g = rgb.index({at::indexing::Slice(), at::indexing::Slice(), 1});
-    auto b = rgb.index({at::indexing::Slice(), at::indexing::Slice(), 2});
+    // Convert float32 to uint8 if needed
+    auto rgb_uint8 = rgb_image.dtype() == at::kByte ? 
+                     rgb_image : rgb_image.to(at::kByte);
     
-    // Exact coefficients from Python utils.py
-    auto y  = (16.0f   + 0.1826f * r + 0.6142f * g + 0.062f  * b).clamp(16.0f, 235.0f);
-    auto cb = (128.0f  - 0.1006f * r - 0.3386f * g + 0.4392f * b).clamp(16.0f, 240.0f);
-    auto cr = (128.0f  + 0.4392f * r - 0.3989f * g - 0.0403f * b).clamp(16.0f, 240.0f);
-    
-    // CRITICAL: Write directly to pre-allocated buffer (eliminates copy_ synchronization)
-    auto ycbcr = at::stack({y, cb, cr}, /*dim=*/2);
-    ycbcr_out.copy_(ycbcr.to(at::kByte));
+    // Call CUDA kernel (no LibTorch tensor operations, no memory allocations)
+    launch_rgb_to_ycbcr(rgb_uint8, ycbcr_out);
 }
 
 void RGBDEstimator::select_camera(const std::vector<at::Tensor>& masks)
@@ -673,32 +665,31 @@ void RGBDEstimator::estimate_fisheye_distance(
     nvtxRangePop();  // Stage1_ComputeCostVolume
     
     // Pass 2: Apply ISB Filter to cost volume (DEDICATED FILTER per camera)
-    // Edge-preserving smoothing in cost space (critical for accuracy)
     nvtxRangePushA("Stage2_ISBFilter_Cost");
     auto filtered_cost_result = cost_filters_[ref_idx_local]->apply(
         guide,
-        camera_cost_volume,  // CRITICAL: Camera-dedicated buffer (no contention!)
+        camera_cost_volume,
         sigma_i_,
         sigma_s_,
-        stream  // Pass stream for async execution
+        stream
     );
     auto filtered_cost_volume = filtered_cost_result.first;
     nvtxRangePop();  // Stage2_ISBFilter_Cost
     
     // Pass 3: Winner-Take-All + Quadratic Fitting
-    // CRITICAL: Use per-camera temp buffer (eliminates resource contention)
     nvtxRangePushA("Stage3_FinalDepth");
     per_camera_temp_distance_buffers_[ref_idx_local].zero_();
     launch_final_depth(
         filtered_cost_volume,
         distance_candidates_,
-        per_camera_temp_distance_buffers_[ref_idx_local],  // Per-camera buffer (no contention!)
+        per_camera_temp_distance_buffers_[ref_idx_local],
         rows,
-        cols
+        cols,
+        stream
     );
     nvtxRangePop();  // Stage3_FinalDepth
     
-    // Optional: Light post-filtering on distance map (DEDICATED FILTER per camera)
+    // Optional: Light post-filtering on distance map
     nvtxRangePushA("Stage4_PostFilter_Distance");
     auto distance_map_batched = per_camera_temp_distance_buffers_[ref_idx_local].unsqueeze(0);
     auto distance_filter_result = distance_filters_[ref_idx_local]->apply(
@@ -706,11 +697,11 @@ void RGBDEstimator::estimate_fisheye_distance(
         distance_map_batched,
         sigma_i_ / 2.0f,
         sigma_s_ / 2.0f,
-        stream  // Pass stream for async execution
+        stream
     );
     auto filtered_distance = distance_filter_result.first.squeeze(0);
     
-    // ZERO-COPY: Write directly to output buffer (eliminates copy_ synchronization)
+    // ZERO-COPY: Write directly to output buffer
     output_buffer.copy_(filtered_distance);
     nvtxRangePop();  // Stage4_PostFilter_Distance
     

@@ -342,7 +342,36 @@ void launch_final_depth(
     const at::Tensor& distance_candidates,
     const at::Tensor& distance_map_out,
     int rows,
+    int cols,
+    cudaStream_t stream = 0
+);
+
+/**
+ * Stage 3 FP16: Compute final depth using __half for 2x memory bandwidth
+ * @param cost_volume Filtered cost volume [D, H, W] FP16
+ * @param distance_candidates Distance values [candidate_count] FP16
+ * @param distance_map_out Output distance map [H, W] FP16
+ * @param rows Image height
+ * @param cols Image width
+ */
+void launch_final_depth_fp16(
+    const at::Tensor& cost_volume,
+    const at::Tensor& distance_candidates,
+    const at::Tensor& distance_map_out,
+    int rows,
     int cols
+);
+
+/**
+ * RGB to YCbCr color space conversion (eliminates LibTorch overhead)
+ * @param rgb_in RGB image [H, W, 3] uint8
+ * @param ycbcr_out YCbCr output [H, W, 3] uint8 (pre-allocated)
+ * @param stream CUDA stream for async execution
+ */
+void launch_rgb_to_ycbcr(
+    const at::Tensor& rgb_in,
+    at::Tensor& ycbcr_out,
+    cudaStream_t stream = 0
 );
 
 // Constants (should match stitcher.cu defines)

@@ -402,11 +402,11 @@ int main(int argc, char** argv) {
     // Pipeline parameters
     const float min_dist = 0.6f;
     const float max_dist = 10.0f;
-    const int candidate_count = 64;
+    const int candidate_count = 32;  // Reduced: 64->48->32 for speed
     const std::vector<int> references_indices = {0, 1, 2, 3};
     
     const std::pair<int, int> original_resolution = {1944, 1096};      // (width, height)
-    const std::pair<int, int> matching_resolution = {1024, 1024};
+    const std::pair<int, int> matching_resolution = {512, 512};         // Reduced: 1024->512->384
     const std::pair<int, int> rgb_to_stitch_resolution = {1216, 1216};
     const std::pair<int, int> panorama_resolution = {2048, 1024};
     

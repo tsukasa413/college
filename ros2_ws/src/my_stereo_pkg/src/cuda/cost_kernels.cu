@@ -12,6 +12,7 @@ Based on: Real-Time Sphere Sweeping Stereo from Multiview Fisheye Images
 #include "my_stereo_pkg/cuda_kernels.hpp"
 #include <torch/torch.h>
 #include <cuda_runtime.h>
+#include <cuda_fp16.h>  // For __half type
 
 // CUDA error checking macro
 #define CUDA_CHECK(call) \
@@ -358,6 +359,75 @@ __global__ void compute_final_depth_kernel(
     distance_map_out[pixel_idx] = dist_0 / ratio;
 }
 
+/**
+ * FP16 Version: Compute final depth map using __half for 2x bandwidth
+ */
+__global__ void compute_final_depth_kernel_fp16(
+    const __half* cost_volume,
+    const __half* distance_candidates,
+    __half* distance_map_out,
+    int candidate_count,
+    int rows,
+    int cols
+)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    
+    if (x >= cols || y >= rows) return;
+    
+    int pixel_idx = y * cols + x;
+    
+    // Find minimum cost (use float for comparison)
+    float min_cost = INFINITY;
+    int min_idx = 0;
+    
+    for (int d = 0; d < candidate_count; ++d) {
+        int cost_idx = d * rows * cols + y * cols + x;
+        float cost = __half2float(cost_volume[cost_idx]);
+        
+        if (cost < min_cost) {
+            min_cost = cost;
+            min_idx = d;
+        }
+    }
+    
+    // Get left and right costs for quadratic fitting
+    float left_cost = INFINITY;
+    float right_cost = INFINITY;
+    
+    if (min_idx > 0) {
+        int left_idx = (min_idx - 1) * rows * cols + y * cols + x;
+        left_cost = __half2float(cost_volume[left_idx]);
+    }
+    
+    if (min_idx < candidate_count - 1) {
+        int right_idx = (min_idx + 1) * rows * cols + y * cols + x;
+        right_cost = __half2float(cost_volume[right_idx]);
+    }
+    
+    // Quadratic fitting
+    float variation = 0.0f;
+    if (min_idx > 0 && min_idx < candidate_count - 1 && 
+        left_cost < INFINITY && right_cost < INFINITY) {
+        float denominator = (left_cost + right_cost) - 2.0f * min_cost + 1e-8f;
+        variation = 0.5f * (left_cost - right_cost) / denominator;
+        variation = fmaxf(-0.5f, fminf(0.5f, variation));
+    }
+    
+    if (min_idx == 0 || min_idx == candidate_count - 1) {
+        variation = 0.0f;
+    }
+    
+    float selected_index = static_cast<float>(min_idx) + variation;
+    
+    float dist_0 = __half2float(distance_candidates[0]);
+    float dist_last = __half2float(distance_candidates[candidate_count - 1]);
+    float ratio = (dist_0 / dist_last - 1.0f) * selected_index / (candidate_count - 1) + 1.0f;
+    
+    distance_map_out[pixel_idx] = __float2half(dist_0 / ratio);
+}
+
 // ============================================================================
 // Texture Object Management
 // ============================================================================
@@ -581,7 +651,8 @@ void launch_final_depth(
     const at::Tensor& distance_candidates,
     const at::Tensor& distance_map_out,
     int rows,
-    int cols
+    int cols,
+    cudaStream_t stream
 )
 {
     int candidate_count = distance_candidates.size(0);
@@ -596,7 +667,7 @@ void launch_final_depth(
     dim3 gridSize((cols + blockSize.x - 1) / blockSize.x,
                   (rows + blockSize.y - 1) / blockSize.y);
     
-    compute_final_depth_kernel<<<gridSize, blockSize>>>(
+    compute_final_depth_kernel<<<gridSize, blockSize, 0, stream>>>(
         d_cost_volume,
         d_distances,
         d_distance_out,
@@ -607,6 +678,47 @@ void launch_final_depth(
     
     CUDA_CHECK(cudaGetLastError());
     // REMOVED: cudaDeviceSynchronize() - async execution
+}
+
+/**
+ * FP16 Version: Launch final depth computation using __half for 2x bandwidth
+ */
+void launch_final_depth_fp16(
+    const at::Tensor& cost_volume,
+    const at::Tensor& distance_candidates,
+    const at::Tensor& distance_map_out,
+    int rows,
+    int cols,
+    cudaStream_t stream
+)
+{
+    int candidate_count = distance_candidates.size(0);
+    
+    // Get device pointers for FP16 data
+    const at::Half* d_cost_volume = cost_volume.data_ptr<at::Half>();
+    const at::Half* d_distances = distance_candidates.data_ptr<at::Half>();
+    at::Half* d_distance_out = distance_map_out.data_ptr<at::Half>();
+    
+    // Cast to __half* for CUDA kernel
+    const __half* cost_half = reinterpret_cast<const __half*>(d_cost_volume);
+    const __half* dist_half = reinterpret_cast<const __half*>(d_distances);
+    __half* out_half = reinterpret_cast<__half*>(d_distance_out);
+    
+    // Launch kernel: 2D grid for (x, y)
+    dim3 blockSize(16, 16);
+    dim3 gridSize((cols + blockSize.x - 1) / blockSize.x,
+                  (rows + blockSize.y - 1) / blockSize.y);
+    
+    compute_final_depth_kernel_fp16<<<gridSize, blockSize, 0, stream>>>(
+        cost_half,
+        dist_half,
+        out_half,
+        candidate_count,
+        rows,
+        cols
+    );
+    
+    CUDA_CHECK(cudaGetLastError());
 }
 
 // ============================================================================
@@ -639,4 +751,81 @@ void launch_quadratic_fitting(
     // Legacy function - now deprecated in favor of fused kernel
     // Kept for backward compatibility
     fprintf(stderr, "Warning: launch_quadratic_fitting is deprecated. Use launch_depth_estimation_fused instead.\n");
+}
+
+// ============================================================================
+// RGB to YCbCr Conversion Kernel (eliminates LibTorch overhead)
+// ============================================================================
+
+/**
+ * CUDA kernel: Convert RGB to YCbCr color space
+ * Coefficients match Python utils.py rgb2yCbCr exactly
+ * 
+ * Y  = 16  + 0.1826*R + 0.6142*G + 0.062*B,  clamp [16, 235]
+ * Cb = 128 - 0.1006*R - 0.3386*G + 0.4392*B, clamp [16, 240]
+ * Cr = 128 + 0.4392*R - 0.3989*G - 0.0403*B, clamp [16, 240]
+ */
+__global__ void rgb_to_ycbcr_kernel(
+    const uint8_t* __restrict__ rgb_in,   // [H, W, 3] RGB input
+    uint8_t* __restrict__ ycbcr_out,      // [H, W, 3] YCbCr output
+    int rows,
+    int cols
+)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    
+    if (x >= cols || y >= rows) return;
+    
+    int pixel_idx = (y * cols + x) * 3;
+    
+    // Read RGB values (uint8)
+    float r = static_cast<float>(rgb_in[pixel_idx + 0]);
+    float g = static_cast<float>(rgb_in[pixel_idx + 1]);
+    float b = static_cast<float>(rgb_in[pixel_idx + 2]);
+    
+    // Apply YCbCr transform with exact Python coefficients
+    float y_val  = 16.0f  + 0.1826f * r + 0.6142f * g + 0.062f  * b;
+    float cb_val = 128.0f - 0.1006f * r - 0.3386f * g + 0.4392f * b;
+    float cr_val = 128.0f + 0.4392f * r - 0.3989f * g - 0.0403f * b;
+    
+    // Clamp to valid ranges
+    y_val  = fmaxf(16.0f, fminf(235.0f, y_val));
+    cb_val = fmaxf(16.0f, fminf(240.0f, cb_val));
+    cr_val = fmaxf(16.0f, fminf(240.0f, cr_val));
+    
+    // Write YCbCr values (uint8)
+    ycbcr_out[pixel_idx + 0] = static_cast<uint8_t>(y_val);
+    ycbcr_out[pixel_idx + 1] = static_cast<uint8_t>(cb_val);
+    ycbcr_out[pixel_idx + 2] = static_cast<uint8_t>(cr_val);
+}
+
+/**
+ * Launch RGB to YCbCr conversion kernel
+ */
+void launch_rgb_to_ycbcr(
+    const at::Tensor& rgb_in,
+    at::Tensor& ycbcr_out,
+    cudaStream_t stream
+)
+{
+    TORCH_CHECK(rgb_in.dim() == 3 && rgb_in.size(2) == 3, "RGB must be [H, W, 3]");
+    TORCH_CHECK(rgb_in.dtype() == at::kByte, "RGB must be uint8");
+    TORCH_CHECK(ycbcr_out.dtype() == at::kByte, "YCbCr must be uint8");
+    
+    int rows = rgb_in.size(0);
+    int cols = rgb_in.size(1);
+    
+    const uint8_t* d_rgb = rgb_in.data_ptr<uint8_t>();
+    uint8_t* d_ycbcr = ycbcr_out.data_ptr<uint8_t>();
+    
+    dim3 blockSize(16, 16);
+    dim3 gridSize((cols + blockSize.x - 1) / blockSize.x,
+                  (rows + blockSize.y - 1) / blockSize.y);
+    
+    rgb_to_ycbcr_kernel<<<gridSize, blockSize, 0, stream>>>(
+        d_rgb, d_ycbcr, rows, cols
+    );
+    
+    CUDA_CHECK(cudaGetLastError());
 }
