@@ -1,0 +1,22 @@
+{
+  "distance": {
+    "min": 0.6,
+    "max": 10.0,
+    "candidates": 64
+  },
+  "resolution": {
+    "original": [1944, 1096],
+    "matching": [512, 512],
+    "rgb_to_stitch": [1216, 608],
+    "panorama": [2048, 1024]
+  },
+  "filter": {
+    "sigma_i": 10.0,
+    "sigma_s": 25.0
+  },
+  "references_indices": [0, 1, 2, 3],
+  "camera": {
+    "num_cameras": 4,
+    "sensor_mode": 2
+  }
+}

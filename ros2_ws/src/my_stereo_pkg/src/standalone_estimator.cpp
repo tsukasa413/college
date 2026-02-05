@@ -1,9 +1,9 @@
 /**
- * Standalone C++ RGBD Estimator
+ * Standalone C++ RGBD Estimator with Real-Time Camera Streaming
  * 
  * Pure C++ implementation for full-sphere stereo depth estimation.
- * No Python dependencies - reads calibration JSON, loads images,
- * runs depth estimation, and saves results.
+ * Uses GStreamer to capture live video from 4 cameras and runs
+ * continuous depth estimation.
  */
 
 #include <iostream>
@@ -12,8 +12,10 @@
 #include <string>
 #include <chrono>
 #include <cmath>
+#include <memory>
+#include <thread>
 
-// OpenCV for image I/O
+// OpenCV for image I/O and GStreamer
 #include <opencv2/opencv.hpp>
 
 // Eigen for matrix operations
@@ -34,6 +36,209 @@
 
 using json = nlohmann::json;
 using namespace my_stereo_pkg;
+
+
+/**
+ * Configuration structure to hold all pipeline parameters
+ */
+struct Config {
+    // Distance parameters
+    float min_dist;
+    float max_dist;
+    int candidate_count;
+    
+    // Resolution parameters
+    std::pair<int, int> original_resolution;
+    std::pair<int, int> matching_resolution;
+    std::pair<int, int> rgb_to_stitch_resolution;
+    std::pair<int, int> panorama_resolution;
+    
+    // Filter parameters
+    float sigma_i;
+    float sigma_s;
+    
+    // Camera parameters
+    std::vector<int> references_indices;
+    int num_cameras;
+    int sensor_mode;
+    
+    /**
+     * Load configuration from JSON file
+     */
+    static Config load(const std::string& config_path) {
+        std::ifstream file(config_path);
+        if (!file.is_open()) {
+            throw std::runtime_error("Failed to open config file: " + config_path);
+        }
+        
+        json config_json;
+        file >> config_json;
+        
+        Config config;
+        
+        // Distance parameters
+        config.min_dist = config_json["distance"]["min"].get<float>();
+        config.max_dist = config_json["distance"]["max"].get<float>();
+        config.candidate_count = config_json["distance"]["candidates"].get<int>();
+        
+        // Resolution parameters
+        config.original_resolution = {
+            config_json["resolution"]["original"][0].get<int>(),
+            config_json["resolution"]["original"][1].get<int>()
+        };
+        config.matching_resolution = {
+            config_json["resolution"]["matching"][0].get<int>(),
+            config_json["resolution"]["matching"][1].get<int>()
+        };
+        config.rgb_to_stitch_resolution = {
+            config_json["resolution"]["rgb_to_stitch"][0].get<int>(),
+            config_json["resolution"]["rgb_to_stitch"][1].get<int>()
+        };
+        config.panorama_resolution = {
+            config_json["resolution"]["panorama"][0].get<int>(),
+            config_json["resolution"]["panorama"][1].get<int>()
+        };
+        
+        // Filter parameters
+        config.sigma_i = config_json["filter"]["sigma_i"].get<float>();
+        config.sigma_s = config_json["filter"]["sigma_s"].get<float>();
+        
+        // References indices
+        config.references_indices = config_json["references_indices"].get<std::vector<int>>();
+        
+        // Camera parameters
+        config.num_cameras = config_json["camera"]["num_cameras"].get<int>();
+        config.sensor_mode = config_json["camera"]["sensor_mode"].get<int>();
+        
+        return config;
+    }
+    
+    /**
+     * Print configuration summary
+     */
+    void print() const {
+        std::cout << "\nConfiguration:" << std::endl;
+        std::cout << "  Distance range: [" << min_dist << ", " << max_dist << "]" << std::endl;
+        std::cout << "  Candidates: " << candidate_count << std::endl;
+        std::cout << "  Original resolution: [" << original_resolution.first << ", " << original_resolution.second << "]" << std::endl;
+        std::cout << "  Matching resolution: [" << matching_resolution.first << ", " << matching_resolution.second << "]" << std::endl;
+        std::cout << "  RGB to stitch resolution: [" << rgb_to_stitch_resolution.first << ", " << rgb_to_stitch_resolution.second << "]" << std::endl;
+        std::cout << "  Panorama resolution: [" << panorama_resolution.first << ", " << panorama_resolution.second << "]" << std::endl;
+        std::cout << "  Filter sigma_i: " << sigma_i << std::endl;
+        std::cout << "  Filter sigma_s: " << sigma_s << std::endl;
+        std::cout << "  Num cameras: " << num_cameras << std::endl;
+        std::cout << "  Sensor mode: " << sensor_mode << std::endl;
+        std::cout << "  References: [";
+        for (size_t i = 0; i < references_indices.size(); ++i) {
+            std::cout << references_indices[i];
+            if (i < references_indices.size() - 1) std::cout << ", ";
+        }
+        std::cout << "]" << std::endl;
+    }
+};
+
+
+/**
+ * Camera Streamer Class - Manages 4 GStreamer camera streams
+ */
+class CameraStreamer {
+public:
+    CameraStreamer(int num_cameras = 4, int sensor_mode = 2) 
+        : num_cameras_(num_cameras), sensor_mode_(sensor_mode) {
+        caps_.resize(num_cameras_);
+    }
+    
+    ~CameraStreamer() {
+        close();
+    }
+    
+    /**
+     * Initialize all camera streams with GStreamer pipelines
+     */
+    bool initialize() {
+        std::cout << "Initializing " << num_cameras_ << " camera streams..." << std::endl;
+        
+        for (int i = 0; i < num_cameras_; ++i) {
+            std::string pipeline = buildGStreamerPipeline(i);
+            std::cout << "Camera " << i << " pipeline: " << pipeline << std::endl;
+            
+            caps_[i] = cv::VideoCapture(pipeline, cv::CAP_GSTREAMER);
+            
+            if (!caps_[i].isOpened()) {
+                std::cerr << "ERROR: Failed to open camera " << i << std::endl;
+                return false;
+            }
+            
+            // Test frame capture
+            cv::Mat test_frame;
+            if (!caps_[i].read(test_frame)) {
+                std::cerr << "ERROR: Camera " << i << " opened but cannot read frames" << std::endl;
+                return false;
+            }
+            
+            std::cout << "Camera " << i << " initialized: " 
+                      << test_frame.cols << "x" << test_frame.rows << std::endl;
+        }
+        
+        std::cout << "All cameras initialized successfully!" << std::endl;
+        return true;
+    }
+    
+    /**
+     * Capture frames from all cameras
+     */
+    bool captureFrames(std::vector<cv::Mat>& frames) {
+        frames.clear();
+        frames.reserve(num_cameras_);
+        
+        for (int i = 0; i < num_cameras_; ++i) {
+            cv::Mat frame;
+            if (!caps_[i].read(frame)) {
+                std::cerr << "ERROR: Failed to read frame from camera " << i << std::endl;
+                return false;
+            }
+            frames.push_back(frame);
+        }
+        
+        return true;
+    }
+    
+    /**
+     * Close all camera streams
+     */
+    void close() {
+        for (auto& cap : caps_) {
+            if (cap.isOpened()) {
+                cap.release();
+            }
+        }
+    }
+    
+private:
+    /**
+     * Build GStreamer pipeline string for a camera
+     * Matches Python sync_cam_node.py full_fov_mode pipeline
+     */
+    std::string buildGStreamerPipeline(int camera_id) {
+        // sensor-mode=2: 1944x1096 @ 30fps (full FOV)
+        // Matches Python: full_fov_mode with target 1944x1096
+        std::ostringstream pipeline;
+        pipeline << "nvarguscamerasrc sensor-id=" << camera_id 
+                 << " sensor-mode=" << sensor_mode_ << " bufapi-version=1 ! "
+                 << "video/x-raw(memory:NVMM), width=(int)1944, height=(int)1096, "
+                 << "format=(string)NV12, framerate=(fraction)30/1 ! "
+                 << "nvvidconv ! "
+                 << "video/x-raw, format=(string)BGRx ! "
+                 << "videoconvert ! "
+                 << "video/x-raw, format=(string)BGR ! "
+                 << "appsink drop=true sync=false max-buffers=1";
+        return pipeline.str();
+    }
+    
+    int num_cameras_;
+    int sensor_mode_;
+    std::vector<cv::VideoCapture> caps_;
+};
 
 
 /**
@@ -184,30 +389,27 @@ std::vector<Calibration> parse_calibration(
 
 
 /**
- * Load and preprocess fisheye images
- * Matches Python: read_input_images() in utils.py
+ * Load and preprocess fisheye images from live camera frames
+ * Converts cv::Mat (BGR, HWC) to LibTorch Tensor (RGB, HWC, Float32) and resizes
  */
-std::vector<at::Tensor> load_images(
-    const std::string& dataset_path,
-    const std::string& filename,
-    const std::vector<int>& camera_indices,  // Indices of cameras to load
+std::vector<at::Tensor> preprocess_camera_frames(
+    const std::vector<cv::Mat>& frames,
     const std::pair<int, int>& target_resolution,  // (width, height)
     const at::Device& device
 ) {
-    std::vector<at::Tensor> images;
+    std::vector<at::Tensor> tensors;
+    tensors.reserve(frames.size());
     
-    for (int cam_idx : camera_indices) {
-        std::string image_path = dataset_path + "/cam" + std::to_string(cam_idx) + "/" + filename;
+    for (size_t i = 0; i < frames.size(); ++i) {
+        const cv::Mat& frame = frames[i];
         
-        // Load image with OpenCV (BGR format)
-        cv::Mat img = cv::imread(image_path, cv::IMREAD_COLOR);
-        if (img.empty()) {
-            throw std::runtime_error("Failed to load image: " + image_path);
+        if (frame.empty()) {
+            throw std::runtime_error("Empty frame from camera " + std::to_string(i));
         }
         
         // Convert BGR to RGB
         cv::Mat rgb;
-        cv::cvtColor(img, rgb, cv::COLOR_BGR2RGB);
+        cv::cvtColor(frame, rgb, cv::COLOR_BGR2RGB);
         
         // Convert to float32 [0-255]
         cv::Mat rgb_float;
@@ -223,7 +425,7 @@ std::vector<at::Tensor> load_images(
         // Move to CUDA and permute to CHW format
         tensor = tensor.to(device).permute({2, 0, 1}).unsqueeze(0);  // [1, 3, H, W]
         
-        // Resize using PyTorch's interpolate (use bilinear for better compatibility)
+        // Resize using PyTorch's interpolate (bilinear)
         tensor = torch::nn::functional::interpolate(
             tensor,
             torch::nn::functional::InterpolateFuncOptions()
@@ -235,13 +437,10 @@ std::vector<at::Tensor> load_images(
         // Convert back to HWC format and remove batch dimension
         tensor = tensor.squeeze(0).permute({1, 2, 0});  // [H, W, 3]
         
-        images.push_back(tensor);
+        tensors.push_back(tensor);
     }
     
-    std::cout << "Loaded " << images.size() << " images at resolution ["
-              << target_resolution.first << ", " << target_resolution.second << "]" << std::endl;
-    
-    return images;
+    return tensors;
 }
 
 
@@ -372,16 +571,18 @@ cv::Mat colorize_distance_map(
 
 
 /**
- * Main function
+ * Main function - Real-time camera streaming and depth estimation
  */
 int main(int argc, char** argv) {
     std::cout << "========================================" << std::endl;
-    std::cout << "Standalone C++ RGBD Estimator" << std::endl;
+    std::cout << "Real-Time C++ RGBD Estimator" << std::endl;
     std::cout << "========================================" << std::endl;
     
     // Parse command line arguments
     std::string dataset_path = "/home/motoken/college/sphere-stereo/resources";
     std::string output_dir = "/home/motoken/college/ros2_ws/output/standalone";
+    bool save_every_frame = false;
+    bool show_display = false;  // Default to false for headless operation
     
     if (argc > 1) {
         dataset_path = argv[1];
@@ -389,140 +590,222 @@ int main(int argc, char** argv) {
     if (argc > 2) {
         output_dir = argv[2];
     }
+    if (argc > 3) {
+        if (std::string(argv[3]) == "save") {
+            save_every_frame = true;
+        } else if (std::string(argv[3]) == "display") {
+            show_display = true;
+        }
+    }
     
     std::cout << "\nConfiguration:" << std::endl;
-    std::cout << "  Dataset: " << dataset_path << std::endl;
-    std::cout << "  Output: " << output_dir << std::endl;
+    std::cout << "  Calibration path: " << dataset_path << std::endl;
+    std::cout << "  Output dir: " << output_dir << std::endl;
+    std::cout << "  Save every frame: " << (save_every_frame ? "Yes" : "No") << std::endl;
+    std::cout << "  Show display: " << (show_display ? "Yes" : "No (headless)") << std::endl;
     
     // Create output directory
     std::string mkdir_cmd = "mkdir -p " + output_dir;
     int ret = system(mkdir_cmd.c_str());
     (void)ret;  // Suppress unused warning
     
-    // Pipeline parameters
-    const float min_dist = 0.6f;
-    const float max_dist = 10.0f;
-    const int candidate_count = 32;  // Reduced: 64->48->32 for speed
-    const std::vector<int> references_indices = {0, 1, 2, 3};
-    
-    const std::pair<int, int> original_resolution = {1944, 1096};      // (width, height)
-    const std::pair<int, int> matching_resolution = {512, 512};         // Reduced: 1024->512->384
-    const std::pair<int, int> rgb_to_stitch_resolution = {1216, 1216};
-    const std::pair<int, int> panorama_resolution = {2048, 1024};
-    
-    const float sigma_i = 10.0f;
-    const float sigma_s = 25.0f;
-    
-    const std::string filename = "0.jpg";
+    // Load configuration
+    std::string config_path = dataset_path + "/config.json";
+    Config config = Config::load(config_path);
+    config.print();
     
     at::Device device(at::kCUDA, 0);
     
-    std::cout << "  Distance range: [" << min_dist << ", " << max_dist << "]" << std::endl;
-    std::cout << "  Candidates: " << candidate_count << std::endl;
-    std::cout << "  Original resolution: [" << original_resolution.first << ", " << original_resolution.second << "]" << std::endl;
-    std::cout << "  Matching resolution: [" << matching_resolution.first << ", " << matching_resolution.second << "]" << std::endl;
-    std::cout << "  Panorama resolution: [" << panorama_resolution.first << ", " << panorama_resolution.second << "]" << std::endl;
-    
     try {
-        // Step 1: Load calibration
-        std::cout << "\n[1/5] Loading calibration..." << std::endl;
-        std::string calib_path = dataset_path + "/calibration.json";
-        auto calibrations = parse_calibration(calib_path, original_resolution, matching_resolution, device);
-        int num_cameras = calibrations.size();
-        
-        // Step 2: Load images
-        std::cout << "\n[2/5] Loading images..." << std::endl;
-        
-        // Create camera indices vectors
-        std::vector<int> all_camera_indices(num_cameras);
-        for (int i = 0; i < num_cameras; ++i) {
-            all_camera_indices[i] = i;
+        // Step 1: Initialize camera streamer
+        std::cout << "\n[1/6] Initializing camera streams..." << std::endl;
+        CameraStreamer streamer(config.num_cameras, config.sensor_mode);
+        if (!streamer.initialize()) {
+            throw std::runtime_error("Failed to initialize camera streams");
         }
         
-        auto images_to_match = load_images(dataset_path, filename, all_camera_indices, matching_resolution, device);
-        auto images_to_stitch = load_images(dataset_path, filename, references_indices, rgb_to_stitch_resolution, device);
+        // Step 2: Load calibration
+        std::cout << "\n[2/6] Loading calibration..." << std::endl;
+        std::string calib_path = dataset_path + "/calibration.json";
+        auto calibrations = parse_calibration(calib_path, config.original_resolution, config.matching_resolution, device);
+        int num_cameras = calibrations.size();
         
-        // Step 3: Load masks
-        std::cout << "\n[3/5] Loading masks..." << std::endl;
-        auto masks = load_masks(dataset_path, num_cameras, matching_resolution, device);
+        if (num_cameras != 4) {
+            throw std::runtime_error("Expected 4 cameras in calibration, got " + std::to_string(num_cameras));
+        }
+        
+        // Step 3: Load masks (from disk, only once)
+        std::cout << "\n[3/6] Loading masks..." << std::endl;
+        auto masks = load_masks(dataset_path, num_cameras, config.matching_resolution, device);
         
         // Step 4: Calculate reprojection viewpoint
-        std::cout << "\n[4/5] Calculating reprojection viewpoint..." << std::endl;
-        auto reprojection_viewpoint = calculate_reprojection_viewpoint(calibrations, references_indices, device);
+        std::cout << "\n[4/6] Calculating reprojection viewpoint..." << std::endl;
+        auto reprojection_viewpoint = calculate_reprojection_viewpoint(calibrations, config.references_indices, device);
         std::cout << "  Viewpoint: [" 
                   << reprojection_viewpoint[0].item<float>() << ", "
                   << reprojection_viewpoint[1].item<float>() << ", "
                   << reprojection_viewpoint[2].item<float>() << "]" << std::endl;
         
-        // Step 5: Initialize estimator and run
-        std::cout << "\n[5/5] Running RGBD estimation..." << std::endl;
-        
+        // Step 5: Initialize estimator
+        std::cout << "\n[5/6] Initializing RGBD Estimator..." << std::endl;
         RGBDEstimator estimator(
             calibrations,
-            min_dist,
-            max_dist,
-            candidate_count,
-            references_indices,
+            config.min_dist,
+            config.max_dist,
+            config.candidate_count,
+            config.references_indices,
             reprojection_viewpoint,
             masks,
-            matching_resolution,
-            rgb_to_stitch_resolution,
-            panorama_resolution,
-            sigma_i,
-            sigma_s,
+            config.matching_resolution,
+            config.rgb_to_stitch_resolution,
+            config.panorama_resolution,
+            config.sigma_i,
+            config.sigma_s,
             device
         );
         
-        // Warmup
-        std::cout << "  Warming up..." << std::endl;
-        for (int i = 0; i < 2; ++i) {
+        // Warmup with first few frames
+        std::cout << "\n[6/6] Warming up with live camera frames..." << std::endl;
+        for (int i = 0; i < 3; ++i) {
+            std::vector<cv::Mat> frames;
+            if (!streamer.captureFrames(frames)) {
+                throw std::runtime_error("Failed to capture warmup frames");
+            }
+            
+            auto images_to_match = preprocess_camera_frames(frames, config.matching_resolution, device);
+            auto images_to_stitch = preprocess_camera_frames(
+                {frames[0], frames[1], frames[2], frames[3]}, 
+                config.rgb_to_stitch_resolution, 
+                device
+            );
+            
             auto [rgb, dist] = estimator.run(images_to_match, images_to_stitch);
         }
         torch::cuda::synchronize();
         
-        // Timed run
-        std::cout << "  Running timed inference..." << std::endl;
-        auto start = std::chrono::high_resolution_clock::now();
-        
-        auto [rgb_panorama, distance_panorama] = estimator.run(images_to_match, images_to_stitch);
-        
-        torch::cuda::synchronize();
-        auto end = std::chrono::high_resolution_clock::now();
-        
-        double elapsed_ms = std::chrono::duration<double, std::milli>(end - start).count();
-        
         std::cout << "\n========================================" << std::endl;
-        std::cout << "RESULTS" << std::endl;
-        std::cout << "========================================" << std::endl;
-        std::cout << "Execution time: " << elapsed_ms << " ms" << std::endl;
-        std::cout << "RGB panorama shape: [" << rgb_panorama.size(0) << ", " << rgb_panorama.size(1) << ", " << rgb_panorama.size(2) << "]" << std::endl;
-        std::cout << "Distance panorama shape: [" << distance_panorama.size(0) << ", " << distance_panorama.size(1) << "]" << std::endl;
+        std::cout << "STARTING REAL-TIME INFERENCE" << std::endl;
+        if (show_display) {
+            std::cout << "Press 'q' to quit, 's' to save snapshot" << std::endl;
+        } else {
+            std::cout << "Running in headless mode (Ctrl+C to quit)" << std::endl;
+        }
+        std::cout << "========================================\n" << std::endl;
         
-        // Save results
-        std::cout << "\nSaving results..." << std::endl;
+        // Main loop - continuous processing
+        int frame_count = 0;
+        double total_time_ms = 0.0;
+        double min_time_ms = 1e9;
+        double max_time_ms = 0.0;
         
-        // Save RGB panorama
-        auto rgb_cpu = rgb_panorama.cpu();
-        cv::Mat rgb_mat(rgb_cpu.size(0), rgb_cpu.size(1), CV_8UC3, rgb_cpu.data_ptr<uint8_t>());
-        cv::Mat rgb_bgr;
-        cv::cvtColor(rgb_mat, rgb_bgr, cv::COLOR_RGB2BGR);
-        cv::imwrite(output_dir + "/rgb_panorama.png", rgb_bgr);
-        std::cout << "  Saved: " << output_dir << "/rgb_panorama.png" << std::endl;
+        // Create display window if needed
+        if (show_display) {
+            cv::namedWindow("RGB Panorama", cv::WINDOW_NORMAL);
+            cv::namedWindow("Distance Panorama", cv::WINDOW_NORMAL);
+            cv::resizeWindow("RGB Panorama", 1024, 512);
+            cv::resizeWindow("Distance Panorama", 1024, 512);
+        }
         
-        // Save distance panorama (raw)
-        auto distance_cpu = distance_panorama.cpu();
-        cv::Mat distance_mat(distance_cpu.size(0), distance_cpu.size(1), CV_32FC1, distance_cpu.data_ptr<float>());
-        cv::imwrite(output_dir + "/distance_panorama.exr", distance_mat);
-        std::cout << "  Saved: " << output_dir << "/distance_panorama.exr" << std::endl;
+        while (true) {
+            // Capture frames from all cameras
+            std::vector<cv::Mat> frames;
+            if (!streamer.captureFrames(frames)) {
+                std::cerr << "Warning: Failed to capture frames, skipping..." << std::endl;
+                continue;
+            }
+            
+            // Preprocess frames for matching and stitching
+            auto images_to_match = preprocess_camera_frames(frames, config.matching_resolution, device);
+            auto images_to_stitch = preprocess_camera_frames(
+                {frames[0], frames[1], frames[2], frames[3]}, 
+                config.rgb_to_stitch_resolution, 
+                device
+            );
+            
+            // Run depth estimation
+            auto start = std::chrono::high_resolution_clock::now();
+            auto [rgb_panorama, distance_panorama] = estimator.run(images_to_match, images_to_stitch);
+            torch::cuda::synchronize();
+            auto end = std::chrono::high_resolution_clock::now();
+            
+            double elapsed_ms = std::chrono::duration<double, std::milli>(end - start).count();
+            
+            // Update statistics
+            frame_count++;
+            total_time_ms += elapsed_ms;
+            min_time_ms = std::min(min_time_ms, elapsed_ms);
+            max_time_ms = std::max(max_time_ms, elapsed_ms);
+            
+            // Print status every 30 frames
+            if (frame_count % 30 == 0) {
+                double avg_time = total_time_ms / frame_count;
+                double fps = 1000.0 / avg_time;
+                std::cout << "Frame " << frame_count 
+                          << " | Avg: " << avg_time << " ms (" << fps << " FPS)"
+                          << " | Min: " << min_time_ms << " ms"
+                          << " | Max: " << max_time_ms << " ms"
+                          << " | Current: " << elapsed_ms << " ms" << std::endl;
+            }
+            
+            // Display results
+            if (show_display) {
+                // Convert RGB panorama to OpenCV format
+                auto rgb_cpu = rgb_panorama.cpu();
+                cv::Mat rgb_mat(rgb_cpu.size(0), rgb_cpu.size(1), CV_8UC3, rgb_cpu.data_ptr<uint8_t>());
+                cv::Mat rgb_bgr;
+                cv::cvtColor(rgb_mat, rgb_bgr, cv::COLOR_RGB2BGR);
+                
+                // Colorize distance panorama
+                cv::Mat distance_colored = colorize_distance_map(distance_panorama, config.min_dist, config.max_dist);
+                
+                cv::imshow("RGB Panorama", rgb_bgr);
+                cv::imshow("Distance Panorama", distance_colored);
+                
+                // Handle keyboard input
+                int key = cv::waitKey(1);
+                if (key == 'q' || key == 27) {  // 'q' or ESC
+                    std::cout << "\nQuit requested by user" << std::endl;
+                    break;
+                } else if (key == 's') {  // 's' for snapshot
+                    std::string snapshot_prefix = output_dir + "/snapshot_" + std::to_string(frame_count);
+                    cv::imwrite(snapshot_prefix + "_rgb.png", rgb_bgr);
+                    cv::imwrite(snapshot_prefix + "_distance.png", distance_colored);
+                    std::cout << "Snapshot saved: " << snapshot_prefix << std::endl;
+                }
+            }
+            
+            // Save every frame if requested
+            if (save_every_frame) {
+                std::string frame_prefix = output_dir + "/frame_" + 
+                                          std::to_string(frame_count);
+                
+                auto rgb_cpu = rgb_panorama.cpu();
+                cv::Mat rgb_mat(rgb_cpu.size(0), rgb_cpu.size(1), CV_8UC3, rgb_cpu.data_ptr<uint8_t>());
+                cv::Mat rgb_bgr;
+                cv::cvtColor(rgb_mat, rgb_bgr, cv::COLOR_RGB2BGR);
+                cv::imwrite(frame_prefix + "_rgb.png", rgb_bgr);
+                
+                auto distance_cpu = distance_panorama.cpu();
+                cv::Mat distance_mat(distance_cpu.size(0), distance_cpu.size(1), CV_32FC1, 
+                                    distance_cpu.data_ptr<float>());
+                cv::imwrite(frame_prefix + "_distance.exr", distance_mat);
+            }
+        }
         
-        // Save colorized distance panorama
-        cv::Mat distance_colored = colorize_distance_map(distance_panorama, min_dist, max_dist);
-        cv::imwrite(output_dir + "/distance_panorama_colored.png", distance_colored);
-        std::cout << "  Saved: " << output_dir << "/distance_panorama_colored.png" << std::endl;
-        
+        // Print final statistics
         std::cout << "\n========================================" << std::endl;
-        std::cout << "✓ SUCCESS" << std::endl;
+        std::cout << "FINAL STATISTICS" << std::endl;
         std::cout << "========================================" << std::endl;
+        std::cout << "Total frames: " << frame_count << std::endl;
+        std::cout << "Average time: " << (total_time_ms / frame_count) << " ms" << std::endl;
+        std::cout << "Average FPS: " << (1000.0 * frame_count / total_time_ms) << std::endl;
+        std::cout << "Min time: " << min_time_ms << " ms" << std::endl;
+        std::cout << "Max time: " << max_time_ms << " ms" << std::endl;
+        std::cout << "========================================" << std::endl;
+        
+        // Cleanup
+        streamer.close();
+        cv::destroyAllWindows();
         
     } catch (const std::exception& e) {
         std::cerr << "\n✗ ERROR: " << e.what() << std::endl;

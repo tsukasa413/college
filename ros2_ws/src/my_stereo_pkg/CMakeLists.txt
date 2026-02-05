@@ -39,6 +39,8 @@ set(OpenCV_LIBS
   /usr/lib/aarch64-linux-gnu/libopencv_imgcodecs.so.4.5d
   /usr/lib/aarch64-linux-gnu/libopencv_imgproc.so.4.5d
   /usr/lib/aarch64-linux-gnu/libopencv_calib3d.so.4.5d
+  /usr/lib/aarch64-linux-gnu/libopencv_videoio.so.4.5d
+  /usr/lib/aarch64-linux-gnu/libopencv_highgui.so.4.5d
 )
 
 message(STATUS "Using OpenCV from: ${OpenCV_INCLUDE_DIRS}")
