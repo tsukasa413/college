@@ -651,8 +651,7 @@ void launch_final_depth(
     const at::Tensor& distance_candidates,
     const at::Tensor& distance_map_out,
     int rows,
-    int cols,
-    cudaStream_t stream
+    int cols
 )
 {
     int candidate_count = distance_candidates.size(0);
@@ -667,7 +666,7 @@ void launch_final_depth(
     dim3 gridSize((cols + blockSize.x - 1) / blockSize.x,
                   (rows + blockSize.y - 1) / blockSize.y);
     
-    compute_final_depth_kernel<<<gridSize, blockSize, 0, stream>>>(
+    compute_final_depth_kernel<<<gridSize, blockSize>>>(
         d_cost_volume,
         d_distances,
         d_distance_out,

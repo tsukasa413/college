@@ -342,8 +342,7 @@ void launch_final_depth(
     const at::Tensor& distance_candidates,
     const at::Tensor& distance_map_out,
     int rows,
-    int cols,
-    cudaStream_t stream = 0
+    int cols
 );
 
 /**

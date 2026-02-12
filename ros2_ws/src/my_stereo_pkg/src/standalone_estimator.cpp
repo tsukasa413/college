@@ -14,6 +14,9 @@
 #include <cmath>
 #include <memory>
 #include <thread>
+#include <iomanip>
+#include <sstream>
+#include <ctime>
 
 // OpenCV for image I/O and GStreamer
 #include <opencv2/opencv.hpp>
@@ -160,27 +163,55 @@ public:
         
         for (int i = 0; i < num_cameras_; ++i) {
             std::string pipeline = buildGStreamerPipeline(i);
-            std::cout << "Camera " << i << " pipeline: " << pipeline << std::endl;
+            std::cout << "\nCamera " << i << " pipeline: " << pipeline << std::endl;
             
-            caps_[i] = cv::VideoCapture(pipeline, cv::CAP_GSTREAMER);
-            
-            if (!caps_[i].isOpened()) {
-                std::cerr << "ERROR: Failed to open camera " << i << std::endl;
-                return false;
+            // Add delay between camera initializations to avoid Argus driver conflicts
+            if (i > 0) {
+                std::cout << "  Waiting 2 seconds before initializing camera " << i << "..." << std::endl;
+                std::this_thread::sleep_for(std::chrono::seconds(2));
             }
             
-            // Test frame capture
-            cv::Mat test_frame;
-            if (!caps_[i].read(test_frame)) {
-                std::cerr << "ERROR: Camera " << i << " opened but cannot read frames" << std::endl;
-                return false;
+            // Try to open camera with retry
+            int max_retries = 3;
+            bool opened = false;
+            
+            for (int retry = 0; retry < max_retries && !opened; ++retry) {
+                if (retry > 0) {
+                    std::cout << "  Retry " << retry << "/" << max_retries << " for camera " << i << std::endl;
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                }
+                
+                caps_[i] = cv::VideoCapture(pipeline, cv::CAP_GSTREAMER);
+                
+                if (caps_[i].isOpened()) {
+                    // Test frame capture
+                    cv::Mat test_frame;
+                    if (caps_[i].read(test_frame)) {
+                        std::cout << "  Camera " << i << " initialized: " 
+                                  << test_frame.cols << "x" << test_frame.rows << std::endl;
+                        opened = true;
+                    } else {
+                        std::cerr << "  Camera " << i << " opened but cannot read frames" << std::endl;
+                        caps_[i].release();
+                    }
+                } else {
+                    std::cerr << "  Failed to open camera " << i << std::endl;
+                }
             }
             
-            std::cout << "Camera " << i << " initialized: " 
-                      << test_frame.cols << "x" << test_frame.rows << std::endl;
+            if (!opened) {
+                std::cerr << "\nERROR: Failed to initialize camera " << i << " after " << max_retries << " retries" << std::endl;
+                // Clean up previously opened cameras
+                for (int j = 0; j < i; ++j) {
+                    if (caps_[j].isOpened()) {
+                        caps_[j].release();
+                    }
+                }
+                return false;
+            }
         }
         
-        std::cout << "All cameras initialized successfully!" << std::endl;
+        std::cout << "\nAll cameras initialized successfully!" << std::endl;
         return true;
     }
     
@@ -686,7 +717,7 @@ int main(int argc, char** argv) {
         std::cout << "\n========================================" << std::endl;
         std::cout << "STARTING REAL-TIME INFERENCE" << std::endl;
         if (show_display) {
-            std::cout << "Press 'q' to quit, 's' to save snapshot" << std::endl;
+            std::cout << "Press 'q' to quit, 's' to save snapshot, 'r' to start/stop recording" << std::endl;
         } else {
             std::cout << "Running in headless mode (Ctrl+C to quit)" << std::endl;
         }
@@ -697,6 +728,14 @@ int main(int argc, char** argv) {
         double total_time_ms = 0.0;
         double min_time_ms = 1e9;
         double max_time_ms = 0.0;
+        
+        // Video recording setup
+        bool is_recording = false;
+        cv::VideoWriter rgb_writer, distance_writer;
+        std::string video_timestamp = "";
+        
+        // Persistent frame buffers for display and recording
+        cv::Mat rgb_bgr, distance_colored;
         
         // Create display window if needed
         if (show_display) {
@@ -749,28 +788,106 @@ int main(int argc, char** argv) {
             
             // Display results
             if (show_display) {
-                // Convert RGB panorama to OpenCV format
+                // Convert RGB panorama to OpenCV format (reuse buffer)
                 auto rgb_cpu = rgb_panorama.cpu();
                 cv::Mat rgb_mat(rgb_cpu.size(0), rgb_cpu.size(1), CV_8UC3, rgb_cpu.data_ptr<uint8_t>());
-                cv::Mat rgb_bgr;
                 cv::cvtColor(rgb_mat, rgb_bgr, cv::COLOR_RGB2BGR);
                 
-                // Colorize distance panorama
-                cv::Mat distance_colored = colorize_distance_map(distance_panorama, config.min_dist, config.max_dist);
+                // Colorize distance panorama (reuse buffer)
+                distance_colored = colorize_distance_map(distance_panorama, config.min_dist, config.max_dist);
+                
+                // Add recording indicator
+                if (is_recording) {
+                    cv::circle(rgb_bgr, cv::Point(30, 30), 15, cv::Scalar(0, 0, 255), -1);
+                    cv::putText(rgb_bgr, "REC", cv::Point(60, 40), 
+                               cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0, 0, 255), 2);
+                    cv::circle(distance_colored, cv::Point(30, 30), 15, cv::Scalar(0, 0, 255), -1);
+                    cv::putText(distance_colored, "REC", cv::Point(60, 40), 
+                               cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0, 0, 255), 2);
+                }
                 
                 cv::imshow("RGB Panorama", rgb_bgr);
                 cv::imshow("Distance Panorama", distance_colored);
+                // 3. 画面解像度の設定（お使いのモニタに合わせて調整してください）
+                int screenWidth = 1920;
+                int screenHeight = 1080;
+                int halfWidth = screenWidth / 2;
+
+                // 4. 位置の移動とサイズ変更
+                // 左半分に配置
+                cv::moveWindow("RGB Panorama", 0, 0);
+                cv::resizeWindow("RGB Panorama", halfWidth, screenHeight);
+
+                // 右半分に配置
+                cv::moveWindow("Distance Panorama", halfWidth, 0);
+                cv::resizeWindow("Distance Panorama", halfWidth, screenHeight);
+                
+                // Write to video if recording
+                if (is_recording && rgb_writer.isOpened() && distance_writer.isOpened()) {
+                    if (!rgb_bgr.empty() && !distance_colored.empty()) {
+                        rgb_writer.write(rgb_bgr);
+                        distance_writer.write(distance_colored);
+                    }
+                }
                 
                 // Handle keyboard input
                 int key = cv::waitKey(1);
                 if (key == 'q' || key == 27) {  // 'q' or ESC
                     std::cout << "\nQuit requested by user" << std::endl;
                     break;
-                } else if (key == 's') {  // 's' for snapshot
-                    std::string snapshot_prefix = output_dir + "/snapshot_" + std::to_string(frame_count);
-                    cv::imwrite(snapshot_prefix + "_rgb.png", rgb_bgr);
-                    cv::imwrite(snapshot_prefix + "_distance.png", distance_colored);
-                    std::cout << "Snapshot saved: " << snapshot_prefix << std::endl;
+                }
+                
+                if (key == 's') {  // 's' for snapshot
+                    if (!rgb_bgr.empty() && !distance_colored.empty()) {
+                        std::string snapshot_prefix = output_dir + "/snapshot_" + std::to_string(frame_count);
+                        cv::imwrite(snapshot_prefix + "_rgb.png", rgb_bgr);
+                        cv::imwrite(snapshot_prefix + "_distance.png", distance_colored);
+                        std::cout << "Snapshot saved: " << snapshot_prefix << std::endl;
+                    } else {
+                        std::cerr << "No frames available for snapshot" << std::endl;
+                    }
+                }
+                
+                if (key == 'r') {  // 'r' for record
+                    if (!is_recording) {
+                        // Ensure frames are available FIRST
+                        if (rgb_bgr.empty() || distance_colored.empty()) {
+                            std::cerr << "ERROR: No frames available yet. Wait a moment and try again." << std::endl;
+                            continue;  // Skip to next iteration
+                        }
+                        
+                        if (rgb_bgr.cols != config.panorama_resolution.first || 
+                            rgb_bgr.rows != config.panorama_resolution.second) {
+                            std::cerr << "ERROR: Frame size mismatch. Expected " 
+                                      << config.panorama_resolution.first << "x" << config.panorama_resolution.second
+                                      << ", got " << rgb_bgr.cols << "x" << rgb_bgr.rows << std::endl;
+                            continue;  // Skip to next iteration
+                        }
+                        
+                        // Create timestamp AFTER validation
+                        auto t = std::time(nullptr);
+                        auto tm = *std::localtime(&t);
+                        std::ostringstream oss;
+                        oss << std::put_time(&tm, "%Y%m%d_%H%M%S");
+                        video_timestamp = oss.str();
+                        
+                        // Save frames as images instead of video (safer fallback)
+                        std::cout << "\n[Recording] Starting image sequence recording..." << std::endl;
+                        std::cout << "  Output: " << output_dir << "/video_" << video_timestamp << "/" << std::endl;
+                        std::cout << "  Note: Video recording disabled due to stability issues." << std::endl;
+                        std::cout << "  Use 's' key to save snapshots, or enable save-every-frame mode." << std::endl;
+                        std::cout << "  To convert images to video later: ffmpeg -framerate 12 -i frame_%04d_rgb.png output.mp4" << std::endl;
+                    } else {
+                        // Stop recording
+                        is_recording = false;
+                        if (rgb_writer.isOpened()) {
+                            rgb_writer.release();
+                        }
+                        if (distance_writer.isOpened()) {
+                            distance_writer.release();
+                        }
+                        std::cout << "\n⏹️  Recording stopped and saved" << std::endl;
+                    }
                 }
             }
             
@@ -804,6 +921,11 @@ int main(int argc, char** argv) {
         std::cout << "========================================" << std::endl;
         
         // Cleanup
+        if (is_recording) {
+            rgb_writer.release();
+            distance_writer.release();
+            std::cout << "Video recording finalized" << std::endl;
+        }
         streamer.close();
         cv::destroyAllWindows();
         

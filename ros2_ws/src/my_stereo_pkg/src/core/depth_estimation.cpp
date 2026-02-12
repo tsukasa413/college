@@ -480,7 +480,8 @@ void RGBDEstimator::precompute_relative_rt_matrices()
 
 void RGBDEstimator::rgb_to_ycbcr(const at::Tensor& rgb_image, at::Tensor& ycbcr_out)
 {
-    // RGB to YCbCr conversion using CUDA kernel (eliminates LibTorch overhead)
+    // RGB to YCbCr conversion - MUST match Python utils.py rgb2yCbCr exactly
+    // Note: Input is BGR from OpenCV, treated as RGB by Python code
     // Y  = 16  + 0.1826*R + 0.6142*G + 0.062*B,  clamp [16, 235]
     // Cb = 128 - 0.1006*R - 0.3386*G + 0.4392*B, clamp [16, 240]
     // Cr = 128 + 0.4392*R - 0.3989*G - 0.0403*B, clamp [16, 240]
@@ -488,12 +489,19 @@ void RGBDEstimator::rgb_to_ycbcr(const at::Tensor& rgb_image, at::Tensor& ycbcr_
     TORCH_CHECK(rgb_image.dim() == 3 && rgb_image.size(2) == 3,
                 "RGB image must be [H, W, 3]");
     
-    // Convert float32 to uint8 if needed
-    auto rgb_uint8 = rgb_image.dtype() == at::kByte ? 
-                     rgb_image : rgb_image.to(at::kByte);
+    auto rgb = rgb_image.to(at::kFloat);
+    auto r = rgb.index({at::indexing::Slice(), at::indexing::Slice(), 0});
+    auto g = rgb.index({at::indexing::Slice(), at::indexing::Slice(), 1});
+    auto b = rgb.index({at::indexing::Slice(), at::indexing::Slice(), 2});
     
-    // Call CUDA kernel (no LibTorch tensor operations, no memory allocations)
-    launch_rgb_to_ycbcr(rgb_uint8, ycbcr_out);
+    // Exact coefficients from Python utils.py
+    auto y  = (16.0f   + 0.1826f * r + 0.6142f * g + 0.062f  * b).clamp(16.0f, 235.0f);
+    auto cb = (128.0f  - 0.1006f * r - 0.3386f * g + 0.4392f * b).clamp(16.0f, 240.0f);
+    auto cr = (128.0f  + 0.4392f * r - 0.3989f * g - 0.0403f * b).clamp(16.0f, 240.0f);
+    
+    // CRITICAL: Write directly to pre-allocated buffer (eliminates copy_ synchronization)
+    auto ycbcr = at::stack({y, cb, cr}, /*dim=*/2);
+    ycbcr_out.copy_(ycbcr.to(at::kByte));
 }
 
 void RGBDEstimator::select_camera(const std::vector<at::Tensor>& masks)
@@ -677,6 +685,7 @@ void RGBDEstimator::estimate_fisheye_distance(
     nvtxRangePop();  // Stage2_ISBFilter_Cost
     
     // Pass 3: Winner-Take-All + Quadratic Fitting
+    // CRITICAL: Use per-camera temp buffer (eliminates resource contention)
     nvtxRangePushA("Stage3_FinalDepth");
     per_camera_temp_distance_buffers_[ref_idx_local].zero_();
     launch_final_depth(
@@ -684,8 +693,7 @@ void RGBDEstimator::estimate_fisheye_distance(
         distance_candidates_,
         per_camera_temp_distance_buffers_[ref_idx_local],
         rows,
-        cols,
-        stream
+        cols
     );
     nvtxRangePop();  // Stage3_FinalDepth
     
