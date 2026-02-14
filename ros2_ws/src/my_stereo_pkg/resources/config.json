@@ -1,6 +1,6 @@
 {
   "distance": {
-    "min": 0.8,
+    "min": 0.4,
     "max": 25.0,
     "candidates": 128
   },
@@ -14,6 +14,11 @@
     "sigma_i": 10.0,
     "sigma_s": 25.0
   },
+  "pointcloud": {
+    "min_depth": 0.3,
+    "max_depth": 50.0
+  },
+  "publish_rate_hz": 5.0,
   "references_indices": [0, 1, 2, 3],
   "camera": {
     "num_cameras": 4,

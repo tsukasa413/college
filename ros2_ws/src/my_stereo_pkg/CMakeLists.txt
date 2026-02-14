@@ -27,8 +27,13 @@ endif()
 # Find dependencies
 find_package(ament_cmake REQUIRED)
 find_package(ament_cmake_python REQUIRED)
-# find_package(rclcpp REQUIRED)
-# find_package(sensor_msgs REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_ros REQUIRED)
 # find_package(cv_bridge REQUIRED)  # Temporarily disabled due to OpenCV issues
 
 # Find OpenCV (required for standalone estimator)
@@ -90,6 +95,7 @@ add_library(cuda_kernels_lib STATIC
   src/cuda/stitcher.cu
   src/cuda/isb_filter.cu
   src/cuda/cost_kernels.cu
+  src/cuda/pointcloud_kernels.cu
   src/cuda_wrapper.cu
 )
 
@@ -153,6 +159,36 @@ target_link_libraries(stitcher_lib PUBLIC
   ${TORCH_LIBRARIES}
 )
 
+# Create Point Cloud Generator library (separate from stitcher_lib due to ROS 2 dependency)
+add_library(pointcloud_lib STATIC
+  src/core/point_cloud_generator.cpp
+)
+
+# Set properties for Point Cloud library
+set_target_properties(pointcloud_lib PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED ON
+  POSITION_INDEPENDENT_CODE ON
+)
+
+# Apply PyTorch C++ flags
+target_compile_options(pointcloud_lib PRIVATE
+  ${TORCH_CXX_FLAGS}
+)
+
+# Link ROS 2 dependencies for Point Cloud library (uses PLAIN signature)
+ament_target_dependencies(pointcloud_lib
+  rclcpp
+  sensor_msgs
+)
+
+# Link Point Cloud library with PyTorch and CUDA (must use PLAIN signature after ament_target_dependencies)
+target_link_libraries(pointcloud_lib
+  cuda_kernels_lib
+  ${TORCH_LIBRARIES}
+  CUDA::cudart
+)
+
 # Create PyTorch extension module (instead of pybind11_add_module)
 add_library(_core_cpp MODULE 
   src/bindings.cpp
@@ -214,6 +250,60 @@ target_compile_options(standalone_estimator PRIVATE
 # Install standalone executable
 install(TARGETS standalone_estimator
   DESTINATION lib/${PROJECT_NAME}
+)
+
+# Create omnidirectional SLAM ROS 2 node
+add_executable(omnidirectional_slam_node
+  src/omnidirectional_slam_node.cpp
+)
+
+# Set properties for SLAM node
+set_target_properties(omnidirectional_slam_node PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED ON
+)
+
+# Apply PyTorch C++ flags
+target_compile_options(omnidirectional_slam_node PRIVATE
+  ${TORCH_CXX_FLAGS}
+)
+
+# Link ROS 2 dependencies FIRST (before target_link_libraries)
+ament_target_dependencies(omnidirectional_slam_node
+  rclcpp
+  sensor_msgs
+  std_msgs
+  geometry_msgs
+  nav_msgs
+  tf2
+  tf2_ros
+)
+
+# Link SLAM node with all required libraries
+target_link_libraries(omnidirectional_slam_node
+  stitcher_lib
+  pointcloud_lib
+  cuda_kernels_lib
+  ${TORCH_LIBRARIES}
+  ${OpenCV_LIBS}
+  CUDA::nvToolsExt
+)
+
+# Install SLAM node executable
+install(TARGETS omnidirectional_slam_node
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+# Install launch files
+install(DIRECTORY
+  launch
+  DESTINATION share/${PROJECT_NAME}/
+)
+
+# Install resources
+install(DIRECTORY
+  resources
+  DESTINATION share/${PROJECT_NAME}/
 )
 
 # Install Python scripts

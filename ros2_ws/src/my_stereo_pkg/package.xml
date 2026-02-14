@@ -14,7 +14,12 @@
   <!-- ROS 2 dependencies -->
   <depend>rclcpp</depend>
   <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
   <depend>cv_bridge</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
 
   <!-- System dependencies (handled by find_package in CMakeLists.txt) -->
   <!-- torch: PyTorch C++ API -->
