@@ -1,0 +1,44 @@
+icp_odometry:
+  ros__parameters:
+    frame_id: camera_link
+    odom_frame_id: odom
+    subscribe_scan_cloud: true
+    subscribe_scan: false  # Disable /scan subscription
+    publish_tf: true
+    
+    # Point cloud aggressive downsampling for real-time performance
+    scan_cloud_max_points: 5000  # Heavily reduced for Orin real-time
+    scan_downsampling_step: 5  # Skip more points aggressively
+    
+    # Explicitly enable odom topic publishing
+    publish_null_when_lost: true  # Enable odom publishing even when lost
+    wait_for_transform: 0.1  # Shorter wait for real-time
+    Reg/Strategy: "1"  # ICP requires strategy 1
+    
+    # Aggressive downsampling for 360° panorama (combat delay)
+    Icp/VoxelSize: "0.15"  # 15cm voxels - much larger for speed
+    Icp/MaxCorrespondenceDistance: "0.1"  # 10cm max - ignore far matches
+    Icp/PointToPlane: "false"  # Point-to-point for panorama stability
+    Icp/PointToPlaneK: "5"  # Neighbors for normal estimation
+    Icp/PointToPlaneRadius: "0.0"  # Use K-NN instead of radius
+    Icp/MaxTranslation: "1.0"  # Tighter translation limit
+    Icp/MaxRotation: "0.5236"  # 30 degrees - more conservative
+    Icp/CorrespondenceRatio: "0.5"  # Higher ratio for stability
+    Icp/MaxIterations: "15"  # Fewer iterations for speed
+    Icp/Epsilon: "0.001"  # Reasonable convergence
+    
+    # Enable robust estimation
+    Icp/OutlierRatio: "0.7"  # More aggressive outlier rejection
+    Icp/RANSAC: "true"
+    Icp/RANSACIterations: "30"  # Fewer iterations for speed
+    
+    # Odometry parameters for panorama
+    Odom/Strategy: "0"  # ICP
+    Odom/ResetCountdown: "1"  # Quick reset if lost
+    Odom/FilteringStrategy: "1"  # Kalman filtering
+    Odom/GuessMotion: "true"  # Use motion model
+    
+    # Force 3DoF for ground plane robots (prevent weird rotation)
+    Reg/Force3DoF: "true"  # Constrain to X, Y, Yaw only
+    RGBD/LinearUpdate: "0.0"  # Update every frame
+    RGBD/AngularUpdate: "0.0"  # Update every frame

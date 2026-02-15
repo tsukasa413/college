@@ -20,6 +20,9 @@
   <depend>cv_bridge</depend>
   <depend>tf2</depend>
   <depend>tf2_ros</depend>
+  <depend>realsense2_camera</depend>
+  <depend>rtabmap_odom</depend>
+  <depend>rtabmap_ros</depend>
 
   <!-- System dependencies (handled by find_package in CMakeLists.txt) -->
   <!-- torch: PyTorch C++ API -->

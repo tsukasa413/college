@@ -572,7 +572,7 @@ void OmnidirectionalSlamNode::processingLoop() {
         // Create message header
         std_msgs::msg::Header header;
         header.stamp = this->now();
-        header.frame_id = "omnidirectional_camera";
+        header.frame_id = "camera_link";
         
         // Publish RGB panorama
         auto rgb_msg = tensorToImageMsg(rgb_panorama, header, "rgb8");
@@ -714,7 +714,7 @@ void OmnidirectionalSlamNode::publishTransforms(const rclcpp::Time& timestamp) {
     geometry_msgs::msg::TransformStamped transform;
     transform.header.stamp = timestamp;
     transform.header.frame_id = "world";
-    transform.child_frame_id = "omnidirectional_camera";
+    transform.child_frame_id = "camera_link";
     
     // Identity transform (camera at origin)
     transform.transform.translation.x = 0.0;

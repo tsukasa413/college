@@ -203,14 +203,14 @@ sensor_msgs::msg::PointCloud2 PointCloudGenerator::toRosPointCloud2(
         *iter_y = points_acc[i][1];
         *iter_z = points_acc[i][2];
         
-        // Pack RGB as uint32
+        // Pack RGB as uint32 (BGR order for RViz compatibility)
         uint8_t r = static_cast<uint8_t>(points_acc[i][3]);
         uint8_t g = static_cast<uint8_t>(points_acc[i][4]);
         uint8_t b = static_cast<uint8_t>(points_acc[i][5]);
         
-        iter_r[0] = r;
-        iter_r[1] = g;
-        iter_r[2] = b;
+        iter_r[0] = b; // Blue (RViz expects BGR)
+        iter_r[1] = g; // Green  
+        iter_r[2] = r; // Red 
         iter_r[3] = 0;
         
         ++iter_x;

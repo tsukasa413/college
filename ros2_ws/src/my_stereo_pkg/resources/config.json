@@ -1,8 +1,8 @@
 {
   "distance": {
     "min": 0.4,
-    "max": 25.0,
-    "candidates": 128
+    "max": 15.0,
+    "candidates": 64
   },
   "resolution": {
     "original": [1944, 1096],

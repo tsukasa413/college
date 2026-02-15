@@ -423,3 +423,20 @@ For questions or issues, please open a GitHub issue or contact [your email].
 **Last Updated:** February 5, 2026  
 **Version:** 1.0.0  
 **Status:** Production-ready for Jetson AGX Orin
+
+
+
+
+
+# 1. ICP Odometry停止
+pkill -f icp_odometry
+
+# 2. ICP Odometry再起動（新しい設定で）
+cd ~/college/ros2_ws && source install/setup.bash && \
+ros2 run rtabmap_odom icp_odometry --ros-args \
+  --params-file src/my_stereo_pkg/config/icp_odometry_config.yaml \
+  -r scan_cloud:=/omnidirectional/point_cloud &
+
+# 3. RViz起動（新しい設定で）
+cd ~/college/ros2_ws && source install/setup.bash && \
+rviz2 -d src/my_stereo_pkg/rviz/lightweight_slam.rviz
